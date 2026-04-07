@@ -526,11 +526,14 @@ body {
 /* ── Disabled form fields ────────────────────────────────────────────────────── */
 .field-disabled select,
 .field-disabled input {
-  opacity: 0.45;
+  opacity: 1;
   cursor: not-allowed;
   background: #1e2128;
+  color: #8a8d90;
+  border-color: #2a2d33;
+  pointer-events: none;
 }
-.row-label-disabled { opacity: 0.45; }
+.row-label-disabled { color: #6a6e73; }
 .field-disabled-hint {
   font-size: 0.77rem;
   color: #e8a020;

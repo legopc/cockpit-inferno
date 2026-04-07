@@ -1261,7 +1261,6 @@ function drawSparkline(pts) {
 // ── Health check panel ─────────────────────────────────────────────────────
 var HC_CHECKS = [
     { id: "hc-snd-aloop",  name: "snd-aloop loaded",       fix: "loadAloop()" },
-    { id: "hc-sentinel",   name: "Deploy sentinel present", fix: null },
     { id: "hc-ptp",        name: "PTP clock locked",        fix: null },
     { id: "hc-bridge",     name: "inferno-bridge active",   fix: "svcAction('inferno-bridge','restart',false)" },
     { id: "hc-librespot",  name: "librespot active",        fix: "svcAction('librespot','restart',false)" },
@@ -1317,11 +1316,6 @@ async function runHealthCheck() {
         return o.trim() ? { status: "pass", detail: o.trim() } : { status: "fail", detail: "not in /proc/asound/cards" };
     }, "loadAloop()");
 
-    await check("Deploy sentinel present", async function() {
-        var o = await spSudo("test -f " + SENTINEL + " && echo ok || echo missing");
-        return o.trim() === "ok" ? { status: "pass", detail: SENTINEL } : { status: "warn", detail: "missing \u2014 will re-deploy on reboot" };
-    }, null);
-
     await check("PTP clock locked", async function() {
         var o = await spSudo("journalctl -u statime-inferno -n 40 --no-pager -o cat | grep -i locked | tail -1");
         return o.trim() ? { status: "pass", detail: "locked" } : { status: "warn", detail: "not yet locked (may be syncing)" };
@@ -1345,9 +1339,18 @@ async function runHealthCheck() {
     }, "svcAction('statime-inferno','restart',true)");
 
     await check("Disk < 80% used", async function() {
-        var df = (await sp(["df", "/"])).trim().split("\n")[1].split(/\s+/);
-        var pct = parseInt(df[4]) || 0;
-        return pct < 80 ? { status: "pass", detail: df[4] + " used" } : { status: (pct < 95 ? "warn" : "fail"), detail: df[4] + " used \u2014 low space" };
+        var targets = ["/sysroot", "/var", "/"];
+        for (var i = 0; i < targets.length; i++) {
+            try {
+                var df  = (await sp(["df", targets[i]])).trim().split("\n")[1].split(/\s+/);
+                var pct = parseInt(df[4]) || 0;
+                if (df[1] === "8368128" || df[1] === "0") continue; // skip composefs sentinel size
+                return pct < 80
+                    ? { status: "pass", detail: df[4] + " used on " + targets[i] }
+                    : { status: (pct < 95 ? "warn" : "fail"), detail: df[4] + " used on " + targets[i] + " — low space" };
+            } catch (_) {}
+        }
+        return { status: "warn", detail: "could not determine disk usage" };
     }, null);
 
     await check("NIC has IP address", async function() {
