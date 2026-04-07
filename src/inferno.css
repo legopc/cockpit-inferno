@@ -550,3 +550,62 @@ body {
 .sc-table { width: 100%; }
 .sc-key   { color: #8a8d90; font-size: 0.82rem; width: 38%; padding-right: 8px; }
 .sc-hint  { color: #6a6e73; font-size: 0.77rem; font-style: italic; }
+
+/* ── Diagnostics tab ───────────────────────────────────────────────────────── */
+.diag-stats-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+.stat-item {
+  background: var(--card-bg, rgba(255,255,255,0.05));
+  border-radius: 6px;
+  padding: 8px 14px;
+  min-width: 100px;
+}
+.stat-item span {
+  display: block;
+  font-size: 0.75rem;
+  opacity: 0.6;
+  margin-bottom: 2px;
+}
+.stat-item strong {
+  font-family: monospace;
+  font-size: 0.95rem;
+}
+.stat-badge {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  align-self: center;
+}
+.badge-green  { background: rgba(34,197,94,0.2);  color: #22c55e; }
+.badge-yellow { background: rgba(234,179,8,0.2);  color: #eab308; }
+.badge-red    { background: rgba(239,68,68,0.2);  color: #ef4444; }
+
+.diag-health-content {
+  margin-top: 8px;
+}
+.diag-pre {
+  font-size: 0.78rem;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.diag-log-output {
+  font-family: monospace;
+  font-size: 0.78rem;
+  background: rgba(0,0,0,0.3);
+  border-radius: 6px;
+  padding: 12px;
+  white-space: pre-wrap;
+  max-height: 500px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
