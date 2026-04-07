@@ -33,8 +33,8 @@
 
   <!-- Tab Navigation -->
   <nav class="tab-nav">
-    <button class="tab-btn tab-btn-active" data-tab="tab-services">⚙ Services</button>
-    <button class="tab-btn" data-tab="tab-config">🔧 Config</button>
+    <button class="tab-btn tab-btn-active" data-tab="tab-config">🔧 Config</button>
+    <button class="tab-btn" data-tab="tab-services">⚙ Services</button>
     <button class="tab-btn" data-tab="tab-audio">🔊 Audio</button>
     <button class="tab-btn" data-tab="tab-monitoring">📊 Monitoring</button>
   </nav>
@@ -42,7 +42,7 @@
   <div class="page-body">
 
     <!-- ── Tab: Services ──────────────────────────────────────────────── -->
-    <div class="tab-panel" id="tab-services">
+    <div class="tab-panel tab-panel-hidden" id="tab-services">
 
       <!-- Services -->
       <div class="card">
@@ -86,7 +86,7 @@
     </div><!-- /tab-services -->
 
     <!-- ── Tab: Config ─────────────────────────────────────────────────── -->
-    <div class="tab-panel tab-panel-hidden" id="tab-config">
+    <div class="tab-panel" id="tab-config">
 
       <!-- Config + System Info / Actions -->
       <div class="two-col">
@@ -114,23 +114,25 @@
               <div class="row-hint">Shown in Spotify as playback target · restarts librespot on save</div>
             </div>
 
-            <div class="form-row hidden" id="field-librespot-bitrate">
-              <label class="row-label">Bitrate</label>
-              <select class="form-select" id="cfg-librespot-bitrate">
+            <div class="form-row hidden field-disabled" id="field-librespot-bitrate">
+              <label class="row-label row-label-disabled">Bitrate</label>
+              <select class="form-select" id="cfg-librespot-bitrate" disabled>
                 <option value="320">320 kbps (High Quality)</option>
                 <option value="160">160 kbps</option>
                 <option value="96">96 kbps</option>
               </select>
             </div>
-            <div class="form-row hidden" id="field-librespot-normalize">
-              <label class="row-label">Normalise</label>
-              <select class="form-select" id="cfg-librespot-normalize">
+            <div class="row-hint field-disabled-hint hidden" id="field-librespot-bitrate-hint">Runtime bitrate changes are not supported — requires ALSA reconfiguration.</div>
+            <div class="form-row hidden field-disabled" id="field-librespot-normalize">
+              <label class="row-label row-label-disabled">Normalise</label>
+              <select class="form-select" id="cfg-librespot-normalize" disabled>
                 <option value="">Off</option>
                 <option value="auto">Auto</option>
                 <option value="album">Album</option>
                 <option value="track">Track</option>
               </select>
             </div>
+            <div class="row-hint field-disabled-hint hidden" id="field-librespot-normalize-hint">Normalisation is not supported by this librespot build.</div>
 
             <div class="name-field-highlight">
               <div class="form-row">
@@ -304,6 +306,17 @@
 
     <!-- ── Tab: Monitoring ─────────────────────────────────────────────── -->
     <div class="tab-panel tab-panel-hidden" id="tab-monitoring">
+
+      <!-- Signal Chain Info -->
+      <div class="card" id="card-signal-chain">
+        <div class="card-header">
+          <span class="card-title">📡 Signal Chain</span>
+          <span class="card-subtitle">Read from inferno.conf and .asoundrc</span>
+        </div>
+        <div class="card-body" id="signal-chain-content">
+          <span class="loading-text">Loading…</span>
+        </div>
+      </div>
 
       <!-- Health Check -->
       <div class="card" id="card-health">

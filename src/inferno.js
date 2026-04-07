@@ -148,9 +148,16 @@ async function loadConfig() {
     currentMode = currentConf.INFERNO_MODE || "spotify";
     $("cfg-mode").value = currentMode;
 
-    // Librespot quality settings
-    $("cfg-librespot-bitrate").value   = lsBitrate;
-    $("cfg-librespot-normalize").value = lsNorm;
+    // Librespot quality settings — both grayed out: Inferno does not support
+    // runtime bitrate changes (ALSA impact) and normalisation is not in this build.
+    var bitrateEl   = $("cfg-librespot-bitrate");
+    var normaliseEl = $("cfg-librespot-normalize");
+    bitrateEl.value    = lsBitrate;
+    normaliseEl.value  = lsNorm;
+    bitrateEl.disabled   = true;
+    normaliseEl.disabled = true;
+    bitrateEl.title   = "Bitrate changes are not supported at runtime — would require ALSA reconfiguration";
+    normaliseEl.title = "Normalisation is not supported by this librespot build";
 
     // Loop latency
     var latency = parseInt(currentConf.INFERNO_LOOP_LATENCY) || 10000;
@@ -189,7 +196,9 @@ function onModeChange() {
     var isAuxOut   = currentMode === "aux-out"   || currentMode === "aux-bidir";
     $("field-spotify-name").classList.toggle("hidden", !isSpotify);
     $("field-librespot-bitrate").classList.toggle("hidden", !isSpotify);
+    $("field-librespot-bitrate-hint").classList.toggle("hidden", !isSpotify);
     $("field-librespot-normalize").classList.toggle("hidden", !isSpotify);
+    $("field-librespot-normalize-hint").classList.toggle("hidden", !isSpotify);
     $("field-audio-in").classList.toggle("hidden", !isAuxIn);
     $("field-tx-channels").classList.toggle("hidden", !isAuxIn);
     $("field-audio-out").classList.toggle("hidden", !isAuxOut);
@@ -1005,17 +1014,20 @@ async function refreshSystemInfo() {
         addRow(table, "MAC / NIC", code(mac) + " on " + code(nic));
     } catch (_) {}
 
-    // Network RX/TX stats
+    // Network RX/TX rate — sample twice 1 second apart
     try {
-        var rxb = (await sp(["cat", "/sys/class/net/" + nic + "/statistics/rx_bytes"])).trim();
-        var txb = (await sp(["cat", "/sys/class/net/" + nic + "/statistics/tx_bytes"])).trim();
-        function fmtBytes(b) {
-            b = parseInt(b) || 0;
-            if (b > 1073741824) return (b/1073741824).toFixed(1) + " GB";
-            if (b > 1048576)    return (b/1048576).toFixed(1) + " MB";
-            return (b/1024).toFixed(0) + " KB";
+        function readNicStat(f) { return sp(["cat", "/sys/class/net/" + nic + "/statistics/" + f]).then(function(v){ return parseInt(v.trim()) || 0; }); }
+        var rx0 = await readNicStat("rx_bytes");
+        var tx0 = await readNicStat("tx_bytes");
+        await new Promise(function(r){ setTimeout(r, 1000); });
+        var rx1 = await readNicStat("rx_bytes");
+        var tx1 = await readNicStat("tx_bytes");
+        function fmtRate(bps) {
+            if (bps > 1048576) return (bps/1048576).toFixed(1) + " MB/s";
+            if (bps > 1024)    return (bps/1024).toFixed(0)    + " KB/s";
+            return bps + " B/s";
         }
-        addRow(table, "Net traffic", "RX " + code(fmtBytes(rxb)) + " · TX " + code(fmtBytes(txb)));
+        addRow(table, "Net traffic", "↓ " + code(fmtRate(rx1 - rx0)) + " · ↑ " + code(fmtRate(tx1 - tx0)));
     } catch (_) {}
 
     // Memory
@@ -1028,12 +1040,19 @@ async function refreshSystemInfo() {
         addRow(table, "Memory", code(Math.round(mUsed/1024) + " / " + Math.round(mTotal/1024) + " MB") + " (" + mPct + "% used)");
     } catch (_) {}
 
-    // Disk
+    // Disk — on bootc/OSTree /sysroot is the real disk; / is a composefs overlay
     try {
-        var df = (await sp(["df", "-h", "/"])).trim().split("\n");
-        var dfLine = (df[1] || "").split(/\s+/);
-        if (dfLine.length >= 5) {
-            addRow(table, "Disk /", code(dfLine[2] + " used of " + dfLine[1]) + " (" + dfLine[4] + ")");
+        var dfTargets = ["/sysroot", "/var", "/"];
+        var dfShown   = false;
+        for (var di = 0; di < dfTargets.length && !dfShown; di++) {
+            try {
+                var dfOut  = (await sp(["df", "-h", dfTargets[di]])).trim().split("\n");
+                var dfLine = (dfOut[1] || "").split(/\s+/);
+                if (dfLine.length >= 5 && dfLine[1] !== "8.3M" && dfLine[1] !== "0") {
+                    addRow(table, "Disk (" + dfTargets[di] + ")", code(dfLine[2] + " used of " + dfLine[1]) + " (" + dfLine[4] + ")");
+                    dfShown = true;
+                }
+            } catch (_) {}
         }
     } catch (_) {}
 
@@ -1588,8 +1607,71 @@ function initKeyboardShortcuts() {
     });
 }
 
+// ── Dante / Inferno Signal Chain info card ────────────────────────────────────
+async function refreshSignalChain() {
+    var container = $("signal-chain-content");
+    if (!container) return;
+    container.innerHTML = '<span class="loading-text">Reading signal chain…</span>';
+
+    var rows = [];
+    function scRow(label, val, hint) {
+        rows.push({ label: label, val: val, hint: hint || "" });
+    }
+
+    // From inferno.conf
+    scRow("Mode",          currentConf.INFERNO_MODE || "—");
+    scRow("Dante TX Name", currentConf.INFERNO_DANTE_NAME || currentConf.INFERNO_NAME || "—");
+    scRow("NIC",           currentConf.INFERNO_NIC  || "—");
+    scRow("TX Channels",   currentConf.INFERNO_TX_CHANNELS || "—");
+    scRow("RX Channels",   currentConf.INFERNO_RX_CHANNELS || "—");
+
+    // From .asoundrc — parse TX_LATENCY_NS, RX_LATENCY_NS, format, rate
+    try {
+        var asound = await cockpit.file(ASOUNDRC).read() || "";
+        var txLat  = (asound.match(/TX_LATENCY_NS\s+(\d+)/) || [])[1];
+        var rxLat  = (asound.match(/RX_LATENCY_NS\s+(\d+)/) || [])[1];
+        var fmt    = (asound.match(/format\s+(S\w+)/)        || [])[1];
+        var rate   = (asound.match(/rate\s+(\d+)/)           || [])[1];
+        var chans  = (asound.match(/channels\s+(\d+)/)       || [])[1];
+        if (txLat) scRow("TX Latency", (parseInt(txLat)/1e6).toFixed(1) + " ms", "TX_LATENCY_NS=" + txLat);
+        if (rxLat) scRow("RX Latency", (parseInt(rxLat)/1e6).toFixed(1) + " ms", "RX_LATENCY_NS=" + rxLat);
+        if (fmt)   scRow("ALSA Format",  fmt,  "PCM sample format in .asoundrc");
+        if (rate)  scRow("Sample Rate",  rate + " Hz");
+        if (chans) scRow("ALSA Channels", chans + " ch");
+    } catch (_) {}
+
+    // Dante device name from .asoundrc NAME field
+    try {
+        var asound2  = asound || await cockpit.file(ASOUNDRC).read() || "";
+        var danteName = (asound2.match(/NAME\s+"([^"]+)"/) || [])[1];
+        if (danteName) scRow("Dante PCM Name", danteName, "NAME in inferno_spotify block");
+    } catch (_) {}
+
+    container.innerHTML = "";
+    if (rows.length === 0) {
+        container.innerHTML = '<span class="loading-text">No signal chain data found.</span>';
+        return;
+    }
+    var table = document.createElement("table");
+    table.className = "info-table sc-table";
+    rows.forEach(function(r) {
+        var tr = document.createElement("tr");
+        var k  = document.createElement("td"); k.className = "info-key sc-key"; k.textContent = r.label;
+        var v  = document.createElement("td");
+        var c  = document.createElement("code"); c.textContent = r.val;
+        v.appendChild(c);
+        if (r.hint) {
+            var h = document.createElement("span"); h.className = "sc-hint"; h.textContent = " — " + r.hint;
+            v.appendChild(h);
+        }
+        tr.appendChild(k); tr.appendChild(v);
+        table.appendChild(tr);
+    });
+    container.appendChild(table);
+}
+
 // ── Tab navigation (I-3) ──────────────────────────────────────────────────────
-var _activeTab = "tab-services";
+var _activeTab = "tab-config";
 
 function switchTab(tabId) {
     document.querySelectorAll(".tab-panel").forEach(function(p) {
@@ -1831,6 +1913,7 @@ function togglePeakMonitor() {
 async function refreshAll() {
     await Promise.all([refreshServices(), refreshSystemInfo(), refreshPTP()]);
     refreshHeader();
+    refreshSignalChain().catch(function(){});
 }
 
 async function init() {
