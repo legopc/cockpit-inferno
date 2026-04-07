@@ -1912,6 +1912,213 @@ function togglePeakMonitor() {
     }
 }
 
+
+// ── Diagnostics Tab ────────────────────────────────────────────────────────────
+const DiagnosticsTab = {
+    ptpData: [],
+    ptpJson: null,
+
+    init() {
+        $("diag-ptp-collect-btn").addEventListener("click", () => this.collectPtp());
+        $("diag-ptp-export-btn").addEventListener("click", () => this.exportPtpCsv());
+        $("diag-alsa-refresh-btn").addEventListener("click", () => this.refreshAlsa());
+        $("diag-dante-refresh-btn").addEventListener("click", () => this.refreshDante());
+        $("diag-bench-run-btn").addEventListener("click", () => this.runBench());
+    },
+
+    collectPtp() {
+        const btn = $("diag-ptp-collect-btn");
+        const status = $("diag-ptp-status");
+        btn.disabled = true;
+        btn.textContent = "Collecting…";
+        status.style.display = "block";
+        status.textContent = "Collecting PTP samples (up to 5 min)…";
+
+        const benchPath = "/usr/local/sbin/inferno-bench/ptp-bench.sh";
+        const proc = cockpit.spawn(
+            [benchPath, "--samples", "100", "--output", "/tmp/inferno-ptp-diag.json"],
+            { superuser: "try", err: "message" }
+        );
+
+        proc.stream(data => {
+            status.textContent = data.trim().split("
+").pop() || "Collecting…";
+        });
+
+        proc.then(() => {
+            cockpit.file("/tmp/inferno-ptp-diag.json").read()
+                .then(content => {
+                    if (!content) return;
+                    const result = JSON.parse(content);
+                    this.ptpJson = content;
+                    this.ptpData = result.samples || [];
+                    this.renderSparkline();
+                    this.renderPtpStats(result);
+                    $("diag-ptp-export-btn").disabled = false;
+                    status.textContent = "✓ Collected " + this.ptpData.length + " samples";
+                    btn.disabled = false;
+                    btn.textContent = "Collect 5 min";
+                })
+                .catch(err => {
+                    status.textContent = "Error reading results: " + err.message;
+                    btn.disabled = false;
+                    btn.textContent = "Collect 5 min";
+                });
+        }).catch(err => {
+            status.textContent = "Error: " + (err.message || err);
+            btn.disabled = false;
+            btn.textContent = "Collect 5 min";
+        });
+    },
+
+    renderSparkline() {
+        const canvas = $("diag-ptp-sparkline");
+        const ctx = canvas.getContext("2d");
+        const W = canvas.width, H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+
+        if (!this.ptpData.length) return;
+
+        const vals = this.ptpData.map(s => {
+            return typeof s === "number" ? s : (s.offsetNs || s.offset || 0);
+        });
+        const maxAbs = Math.max(...vals.map(Math.abs), 1);
+        const mid = H / 2;
+
+        ctx.strokeStyle = "#e05810";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        vals.forEach((v, i) => {
+            const x = (i / (vals.length - 1)) * W;
+            const y = mid - (v / maxAbs) * (mid * 0.85);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        ctx.strokeStyle = "rgba(255,255,255,0.15)";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
+    },
+
+    renderPtpStats(result) {
+        const el = $("diag-ptp-stats");
+        const fmt = ns => {
+            const a = Math.abs(ns);
+            if (a < 1e3)  return ns.toFixed(0) + " ns";
+            if (a < 1e6) return (ns / 1e3).toFixed(2) + " µs";
+            return (ns / 1e6).toFixed(2) + " ms";
+        };
+        const grade = result.grade || "";
+        const gradeClass = grade.includes("HW") ? "badge-green" : (grade.includes("RT") ? "badge-yellow" : "badge-red");
+        el.innerHTML =
+            '<div class="stat-badge ' + gradeClass + '">' + grade + "</div>" +
+            '<div class="stat-item"><span>Mean</span><strong>' + fmt(result.mean_ns || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>p95</span><strong>' + fmt(result.p95_ns || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>p99</span><strong>' + fmt(result.p99_ns || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>Abs Max</span><strong>' + fmt(result.abs_max_ns || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>Std Dev</span><strong>' + fmt(result.stddev_ns || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>Samples</span><strong>' + (result.count || 0) + "</strong></div>";
+    },
+
+    exportPtpCsv() {
+        if (!this.ptpData.length) return;
+        const lines = ["index,offset_ns"];
+        this.ptpData.forEach((v, i) => {
+            const ns = typeof v === "number" ? v : (v.offsetNs || v.offset || 0);
+            lines.push(i + "," + ns);
+        });
+        const blob = new Blob([lines.join("
+")], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "inferno-ptp.csv"; a.click();
+        URL.revokeObjectURL(url);
+    },
+
+    refreshAlsa() {
+        const btn = $("diag-alsa-refresh-btn");
+        const content = $("diag-alsa-content");
+        btn.disabled = true;
+        content.innerHTML = '<span class="loading-text">Checking ALSA…</span>';
+
+        const benchPath = "/usr/local/sbin/inferno-bench/alsa-health.sh";
+        let output = "";
+        const proc = cockpit.spawn([benchPath], { superuser: "try", err: "message" });
+        proc.stream(data => { output += data; });
+        proc.then(() => {
+            content.innerHTML = '<pre class="diag-pre">' + this._escHtml(output) + "</pre>";
+            btn.disabled = false;
+        }).catch(err => {
+            content.innerHTML = '<span class="error">' + this._escHtml(err.message || String(err)) + "</span>";
+            btn.disabled = false;
+        });
+    },
+
+    refreshDante() {
+        const btn = $("diag-dante-refresh-btn");
+        const content = $("diag-dante-content");
+        btn.disabled = true;
+        content.innerHTML = '<span class="loading-text">Discovering Dante devices…</span>';
+
+        const benchPath = "/usr/local/sbin/inferno-bench/dante-network-bench.sh";
+        let output = "";
+        const proc = cockpit.spawn([benchPath], { superuser: "try", err: "message" });
+        proc.stream(data => { output += data; });
+        proc.then(() => {
+            content.innerHTML = '<pre class="diag-pre">' + this._escHtml(output) + "</pre>";
+            btn.disabled = false;
+        }).catch(err => {
+            content.innerHTML = '<span class="error">' + this._escHtml(err.message || String(err)) + "</span>";
+            btn.disabled = false;
+        });
+    },
+
+    runBench() {
+        const mode = $("diag-bench-mode").value;
+        const btn = $("diag-bench-run-btn");
+        const outputEl = $("diag-bench-output");
+        const actionsEl = $("diag-bench-actions");
+        btn.disabled = true;
+        outputEl.style.display = "block";
+        outputEl.textContent = "";
+        actionsEl.style.display = "none";
+
+        const benchPath = "/usr/local/sbin/inferno-bench/inferno-bench.sh";
+        const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+        const outDir = "/tmp/inferno-bench-" + ts;
+
+        const proc = cockpit.spawn(
+            [benchPath, "--mode", mode, "--output-dir", outDir],
+            { superuser: "try", err: "message" }
+        );
+
+        proc.stream(data => {
+            outputEl.textContent += data;
+            outputEl.scrollTop = outputEl.scrollHeight;
+        });
+
+        this._benchOutDir = outDir;
+
+        proc.then(() => {
+            btn.disabled = false;
+            btn.textContent = "▶ Run Benchmark";
+            actionsEl.style.display = "block";
+        }).catch(err => {
+            outputEl.textContent += "
+Error: " + (err.message || err);
+            btn.disabled = false;
+            btn.textContent = "▶ Run Benchmark";
+        });
+    },
+
+    _escHtml(str) {
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+    }
+};
+
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function refreshAll() {
     await Promise.all([refreshServices(), refreshSystemInfo(), refreshPTP()]);
@@ -1993,6 +2200,7 @@ async function init() {
 
     // Tab navigation (I-3)
     initTabs();
+    DiagnosticsTab.init();
 
     // Audio level monitor (G-1)
     $("btn-peak-toggle").addEventListener("click", togglePeakMonitor);
