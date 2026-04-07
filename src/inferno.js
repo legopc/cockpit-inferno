@@ -1116,12 +1116,12 @@ async function refreshSystemInfo() {
     try {
         var sentinel = await spSudo("test -f " + SENTINEL + " && echo present || echo absent");
         if ((sentinel || "").trim() === "present") {
-            addRow(table, "Deploy sentinel", "\u2705 present", "text-success");
+            addRow(table, "Deploy sentinel", "\u2705 present");
         } else {
-            addRow(table, "Deploy sentinel", "\u26a0 missing \u2014 re-deploys on next reboot", "text-warning");
+            addRow(table, "Deploy sentinel", "missing \u2014 binaries will refresh on next reboot (harmless)");
         }
     } catch (_) {
-        addRow(table, "Deploy sentinel", "unknown", "text-muted");
+        addRow(table, "Deploy sentinel", "unknown");
     }
 }
 
