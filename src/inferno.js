@@ -35,6 +35,10 @@ let isDirty     = false;
 let USER_UID    = 1000;
 let USER_HOME   = "/var/home/core";
 
+let _refreshTimer  = null;   // auto-refresh interval handle
+let _followTimer   = null;   // journal follow interval handle
+let _ptpHistory    = [];     // rolling offset history for sparkline (max 30 pts)
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
@@ -117,10 +121,16 @@ function buildConfText(conf) {
 async function loadConfig() {
     var spotifyName = "";
     var danteName   = "";
+    var lsBitrate   = "320";
+    var lsNorm      = "";
     try {
         var svcText = await cockpit.file(LIBRESPOT_SVC).read();
         var m = (svcText || "").match(/--name\s+"([^"]+)"/);
         if (m) spotifyName = m[1];
+        var mb = (svcText || "").match(/--bitrate\s+(\d+)/);
+        if (mb) lsBitrate = mb[1];
+        var mn = (svcText || "").match(/--normalisation-method\s+(\S+)/);
+        if (mn) lsNorm = mn[1];
     } catch (_) {}
     try {
         var asoundText = await cockpit.file(ASOUNDRC).read();
@@ -137,6 +147,16 @@ async function loadConfig() {
     $("cfg-dante-name").value   = danteName   || currentConf.INFERNO_NAME || "";
     currentMode = currentConf.INFERNO_MODE || "spotify";
     $("cfg-mode").value = currentMode;
+
+    // Librespot quality settings
+    $("cfg-librespot-bitrate").value   = lsBitrate;
+    $("cfg-librespot-normalize").value = lsNorm;
+
+    // Loop latency
+    var latency = parseInt(currentConf.INFERNO_LOOP_LATENCY) || 10000;
+    $("cfg-loop-latency").value = latency;
+    $("cfg-loop-latency-val").textContent = Math.round(latency/1000) + " ms";
+
     onModeChange();
 
     await populateNics(currentConf.INFERNO_NIC || "auto");
@@ -148,10 +168,13 @@ async function loadConfig() {
 
     $("cfg-tx-channels").value = currentConf.INFERNO_TX_CHANNELS || "2";
     $("cfg-rx-channels").value = currentConf.INFERNO_RX_CHANNELS || "2";
-    onChannelChange(); // sync card-2 visibility with loaded channel count
+    onChannelChange();
 
     isDirty = false;
     $("cfg-dirty-badge").classList.add("hidden");
+    updateModeFlow();
+    // F-2: snapshot form values so diff modal knows what changed
+    _savedConfSnapshot = buildFormSnapshot();
 }
 
 function markDirty() {
@@ -165,11 +188,15 @@ function onModeChange() {
     var isAuxIn    = currentMode === "aux-in"    || currentMode === "aux-bidir";
     var isAuxOut   = currentMode === "aux-out"   || currentMode === "aux-bidir";
     $("field-spotify-name").classList.toggle("hidden", !isSpotify);
+    $("field-librespot-bitrate").classList.toggle("hidden", !isSpotify);
+    $("field-librespot-normalize").classList.toggle("hidden", !isSpotify);
     $("field-audio-in").classList.toggle("hidden", !isAuxIn);
     $("field-tx-channels").classList.toggle("hidden", !isAuxIn);
     $("field-audio-out").classList.toggle("hidden", !isAuxOut);
     $("field-rx-channels").classList.toggle("hidden", !isAuxOut);
-    onChannelChange(); // update card-2 visibility
+    $("field-loop-latency").classList.toggle("hidden", !isAuxIn && !isAuxOut);
+    onChannelChange();
+    updateModeFlow();
 }
 
 function onChannelChange() {
@@ -645,6 +672,10 @@ async function ensureAuxSetup(cardIn, cardIn2, cardOut, cardOut2, txCh, rxCh, da
 
 // ── Save config ────────────────────────────────────────────────────────────────
 async function saveConfig() {
+    // F-2: Show diff modal before applying
+    var confirmed = await showConfigDiff();
+    if (!confirmed) return;
+
     var btn   = $("btn-save");
     var label = $("save-label");
     btn.disabled = true;
@@ -669,6 +700,7 @@ async function saveConfig() {
             INFERNO_AUDIO_CARD_OUT2:$("cfg-audio-out2").value || "none",
             INFERNO_TX_CHANNELS:    $("cfg-tx-channels").value,
             INFERNO_RX_CHANNELS:    $("cfg-rx-channels").value,
+            INFERNO_LOOP_LATENCY:   $("cfg-loop-latency").value,
         });
         await writeFileAsSudo(CONF, buildConfText(newConf));
         currentConf = newConf;
@@ -680,6 +712,17 @@ async function saveConfig() {
         if (newSpotifyName) {
             await spUser("sed -i 's/--name \"[^\"]*\"/--name \"" + newSpotifyName + "\"/' " + LIBRESPOT_SVC);
             msgs.push("Spotify → <b>" + newSpotifyName + "</b>");
+        }
+        // Patch librespot bitrate + normalisation
+        var newBitrate = $("cfg-librespot-bitrate").value;
+        var newNorm    = $("cfg-librespot-normalize").value;
+        if (newBitrate) {
+            // Replace existing --bitrate flag, or append to ExecStart if absent
+            await spUser(
+                "grep -q -- '--bitrate' " + LIBRESPOT_SVC + " 2>/dev/null" +
+                " && sed -i 's/--bitrate [0-9]*/--bitrate " + newBitrate + "/' " + LIBRESPOT_SVC +
+                " || sed -i '/^ExecStart/s/$/ --bitrate " + newBitrate + "/' " + LIBRESPOT_SVC
+            );
         }
         if (newDanteName) {
             // Patch NAME only inside each named block to avoid clobbering aux -TX/-RX suffixes
@@ -726,6 +769,7 @@ async function saveConfig() {
 
         isDirty = false;
         $("cfg-dirty-badge").classList.add("hidden");
+        _savedConfSnapshot = buildFormSnapshot();
         setTimeout(refreshAll, 1500);
 
     } catch (e) {
@@ -762,14 +806,47 @@ async function getSvcStatus(svc) {
     }
 }
 
+async function getSvcMeta(svc) {
+    // Returns { uptime, restarts, lastError } — best-effort, empty strings on failure
+    var isSystem = SYSTEM_SVCS.includes(svc);
+    var props = "ActiveEnterTimestamp,NRestarts,Result";
+    try {
+        var out = isSystem
+            ? await sp(["systemctl", "show", svc, "--property=" + props, "--no-pager"])
+            : await spUser("systemctl --user show " + svc + " --property=" + props + " --no-pager");
+        var p = {};
+        (out || "").split("\n").forEach(function(l) {
+            var i = l.indexOf("=");
+            if (i > 0) p[l.slice(0,i)] = l.slice(i+1).trim();
+        });
+        var uptime = "";
+        if (p.ActiveEnterTimestamp && p.ActiveEnterTimestamp !== "n/a") {
+            var ts = new Date(p.ActiveEnterTimestamp);
+            if (!isNaN(ts)) {
+                var sec = Math.floor((Date.now() - ts) / 1000);
+                if (sec < 60)   uptime = sec + "s";
+                else if (sec < 3600) uptime = Math.floor(sec/60) + "m";
+                else uptime = Math.floor(sec/3600) + "h " + Math.floor((sec%3600)/60) + "m";
+            }
+        }
+        var restarts   = parseInt(p.NRestarts) || 0;
+        var lastError  = (p.Result && p.Result !== "success") ? p.Result : "";
+        return { uptime: uptime, restarts: restarts, lastError: lastError };
+    } catch (_) {
+        return { uptime: "", restarts: 0, lastError: "" };
+    }
+}
+
 async function refreshServices() {
     var svcs     = activeSvcs();
     var statuses = await Promise.all(svcs.map(getSvcStatus));
+    var metas    = await Promise.all(svcs.map(getSvcMeta));
     var grid     = $("svc-grid");
     grid.innerHTML = "";
 
     svcs.forEach(function(svc, i) {
         var state    = statuses[i] || "unknown";
+        var meta     = metas[i]    || {};
         var cls      = ["active","inactive","failed"].includes(state) ? state : "unknown";
         var info     = SVC_LABELS[svc] || { label: svc, desc: "" };
         var isSystem = SYSTEM_SVCS.includes(svc);
@@ -803,6 +880,32 @@ async function refreshServices() {
         statusEl.appendChild(dot);
         statusEl.appendChild(stateEl);
         card.appendChild(statusEl);
+
+        // Uptime + restart count meta row
+        var metaParts = [];
+        if (meta.uptime && state === "active") metaParts.push("up " + meta.uptime);
+        if (meta.restarts > 0) metaParts.push(meta.restarts + " restart" + (meta.restarts > 1 ? "s" : ""));
+        if (metaParts.length) {
+            var metaEl = document.createElement("div");
+            metaEl.className = "svc-meta";
+            if (meta.restarts >= 3) {
+                metaEl.innerHTML = metaParts.map(function(p, idx) {
+                    return idx === 1 ? '<span class="svc-restart-warn">' + p + '</span>' : p;
+                }).join(" · ");
+            } else {
+                metaEl.textContent = metaParts.join(" · ");
+            }
+            card.appendChild(metaEl);
+        }
+
+        // Last error
+        if (meta.lastError) {
+            var errEl = document.createElement("div");
+            errEl.className = "svc-last-error";
+            errEl.textContent = "\u26A0 " + meta.lastError;
+            errEl.title = meta.lastError;
+            card.appendChild(errEl);
+        }
 
         var actEl = document.createElement("div");
         actEl.className = "svc-actions";
@@ -873,6 +976,23 @@ async function refreshSystemInfo() {
         $("hdr-hostname").textContent = hn;
     } catch (_) {}
 
+    // Image version from /etc/os-release
+    try {
+        var osrel = await cockpit.file("/etc/os-release").read();
+        var verMatch = (osrel || "").match(/^OSTREE_VERSION=(.+)$/m) ||
+                       (osrel || "").match(/^IMAGE_VERSION=(.+)$/m) ||
+                       (osrel || "").match(/^BUILD_ID=(.+)$/m);
+        if (verMatch) {
+            addRow(table, "Image version", code(verMatch[1].replace(/['"]/g, "")));
+        } else {
+            // fallback: bootc status (slower)
+            try {
+                var bs = await spSudo("bootc status --format json 2>/dev/null | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['status']['booted']['image']['image']['image'])\" 2>/dev/null");
+                if (bs.trim()) addRow(table, "Image", code(bs.trim()));
+            } catch (_) {}
+        }
+    } catch (_) {}
+
     var nic = currentConf.INFERNO_NIC || "eno1";
     try {
         var ip = (await sp(["bash", "-c", "ip -4 addr show " + nic + " 2>/dev/null | awk '/inet /{print $2}'"])).trim();
@@ -885,6 +1005,39 @@ async function refreshSystemInfo() {
         addRow(table, "MAC / NIC", code(mac) + " on " + code(nic));
     } catch (_) {}
 
+    // Network RX/TX stats
+    try {
+        var rxb = (await sp(["cat", "/sys/class/net/" + nic + "/statistics/rx_bytes"])).trim();
+        var txb = (await sp(["cat", "/sys/class/net/" + nic + "/statistics/tx_bytes"])).trim();
+        function fmtBytes(b) {
+            b = parseInt(b) || 0;
+            if (b > 1073741824) return (b/1073741824).toFixed(1) + " GB";
+            if (b > 1048576)    return (b/1048576).toFixed(1) + " MB";
+            return (b/1024).toFixed(0) + " KB";
+        }
+        addRow(table, "Net traffic", "RX " + code(fmtBytes(rxb)) + " · TX " + code(fmtBytes(txb)));
+    } catch (_) {}
+
+    // Memory
+    try {
+        var meminfo = await cockpit.file("/proc/meminfo").read();
+        var mTotal = parseInt((meminfo.match(/MemTotal:\s+(\d+)/) || [])[1]) || 0;
+        var mAvail = parseInt((meminfo.match(/MemAvailable:\s+(\d+)/) || [])[1]) || 0;
+        var mUsed  = mTotal - mAvail;
+        var mPct   = mTotal ? Math.round(mUsed / mTotal * 100) : 0;
+        addRow(table, "Memory", code(Math.round(mUsed/1024) + " / " + Math.round(mTotal/1024) + " MB") + " (" + mPct + "% used)");
+    } catch (_) {}
+
+    // Disk
+    try {
+        var df = (await sp(["df", "-h", "/"])).trim().split("\n");
+        var dfLine = (df[1] || "").split(/\s+/);
+        if (dfLine.length >= 5) {
+            addRow(table, "Disk /", code(dfLine[2] + " used of " + dfLine[1]) + " (" + dfLine[4] + ")");
+        }
+    } catch (_) {}
+
+    // PTP offset (header pill only — full card handled by refreshPTP)
     try {
         var ptpLine = (await spSudo(
             "journalctl -u statime-inferno -n 30 --no-pager -o cat | grep -oE 'Estimated offset [0-9.+-]+ns' | tail -1"
@@ -901,13 +1054,47 @@ async function refreshSystemInfo() {
         $("hdr-ptp").textContent = "PTP syncing\u2026";
     }
 
+    // snd-aloop check with load button
     try {
         var loop = (await sp(["bash", "-c", "cat /proc/asound/cards | grep -i loopback | head -1"])).trim();
-        addRow(table, "snd-aloop", loop ? code(loop) : "not loaded \u26a0", loop ? "" : "text-danger");
+        if (loop) {
+            addRow(table, "snd-aloop", code(loop));
+        } else {
+            var tr  = document.createElement("tr");
+            var k   = document.createElement("td"); k.className = "info-key"; k.textContent = "snd-aloop";
+            var v   = document.createElement("td"); v.className = "text-danger";
+            var txt = document.createElement("span"); txt.textContent = "not loaded \u26a0 ";
+            var btn = document.createElement("button");
+            btn.className = "btn btn-secondary btn-sm"; btn.id = "btn-load-aloop";
+            btn.textContent = "Load now";
+            btn.addEventListener("click", loadAloop);
+            v.appendChild(txt); v.appendChild(btn);
+            tr.appendChild(k); tr.appendChild(v);
+            table.appendChild(tr);
+        }
+    } catch (_) {}
+
+    // Librespot active session indicator
+    try {
+        var lsState = await spUser("systemctl --user is-active librespot");
+        if (lsState.trim() === "active") {
+            try {
+                var lsLog = await sp(["journalctl", "_SYSTEMD_USER_UNIT=librespot.service",
+                    "-n", "20", "--no-pager", "--output=cat"]);
+                var sessionMatch = lsLog.match(/Loading track|Playing|Paused/);
+                var trackMatch   = lsLog.match(/Loading track "([^"]+)"/);
+                if (trackMatch) {
+                    addRow(table, "Spotify", "\uD83C\uDFB5 " + trackMatch[1], "text-success");
+                } else if (sessionMatch) {
+                    addRow(table, "Spotify", "\uD83D\uDD0A active session", "text-success");
+                } else {
+                    addRow(table, "Spotify", "ready, no active stream", "text-muted");
+                }
+            } catch (_) {}
+        }
     } catch (_) {}
 
     try {
-        // Try reading sentinel — may require sudo on bootc systems
         var sentinel = await spSudo("test -f " + SENTINEL + " && echo present || echo absent");
         if ((sentinel || "").trim() === "present") {
             addRow(table, "Deploy sentinel", "\u2705 present", "text-success");
@@ -919,7 +1106,7 @@ async function refreshSystemInfo() {
     }
 }
 
-// ── Header mode badge ──────────────────────────────────────────────────────────
+// ── Header mode badge ──────────────────────────────────────────────────────
 function refreshHeader() {
     var badge = $("hdr-mode-badge");
     var mode  = currentMode || "spotify";
@@ -930,38 +1117,372 @@ function refreshHeader() {
     badge.appendChild(span);
 }
 
+// ── snd-aloop one-click load ───────────────────────────────────────────────
+async function loadAloop() {
+    var t = toast("Loading snd-aloop\u2026", "info", 0);
+    try {
+        await spSudo("modprobe snd-aloop");
+        t.remove();
+        toast("snd-aloop loaded.", "success");
+        await refreshSystemInfo();
+    } catch (e) {
+        t.remove();
+        toast("modprobe failed: " + ((e && e.message) || String(e)), "error", 0);
+    }
+}
+
+// ── PTP status card ────────────────────────────────────────────────────────
+async function refreshPTP() {
+    var badge   = $("ptp-state-badge");
+    var content = $("ptp-content");
+    content.innerHTML = "";
+
+    try {
+        var raw = await spSudo(
+            "journalctl -u statime-inferno -n 80 --no-pager -o cat"
+        );
+        var lines = (raw || "").split("\n").filter(Boolean).reverse();
+
+        // Determine lock state
+        var state = "unknown";
+        var grandmaster = "";
+        var offsetNs = null;
+        var offsetStr = "";
+
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i];
+            if (/locked/i.test(l) && state === "unknown")       state = "locked";
+            else if (/synchroniz/i.test(l) && state === "unknown") state = "syncing";
+            else if (/acquir/i.test(l) && state === "unknown")  state = "acquiring";
+            var gm = l.match(/grandmaster[:\s]+([0-9a-fA-F:.-]+)/i);
+            if (gm && !grandmaster) grandmaster = gm[1];
+            var off = l.match(/Estimated offset ([0-9.+-]+)ns/);
+            if (off && offsetNs === null) {
+                offsetNs = parseFloat(off[1]);
+                offsetStr = off[1] + " ns";
+            }
+            if (state !== "unknown" && grandmaster && offsetNs !== null) break;
+        }
+        if (state === "unknown") state = "acquiring";
+
+        // Collect all recent offsets for sparkline
+        var allOffsets = [];
+        lines.forEach(function(l) {
+            var m = l.match(/Estimated offset ([0-9.+-]+)ns/);
+            if (m) allOffsets.push(parseFloat(m[1]));
+        });
+        allOffsets.reverse();
+        if (allOffsets.length) {
+            _ptpHistory = _ptpHistory.concat(allOffsets).slice(-30);
+        }
+
+        // Update badge
+        badge.className = "ptp-state-badge ptp-" + (state === "locked" ? "locked" : state === "syncing" ? "syncing" : state === "acquiring" ? "syncing" : "lost");
+        badge.textContent = state === "locked" ? "\uD83D\uDD12 Locked" : state === "syncing" ? "\u231B Syncing\u2026" : "\u26A0 Acquiring\u2026";
+
+        // Offset quality
+        var offsetClass = "good";
+        if (offsetNs !== null) {
+            var absOff = Math.abs(offsetNs);
+            offsetClass = absOff < 1000 ? "good" : absOff < 50000 ? "warn" : "bad";
+        }
+
+        function ptpStat(label, value, cls) {
+            var d = document.createElement("div"); d.className = "ptp-stat";
+            var l = document.createElement("div"); l.className = "ptp-stat-label"; l.textContent = label;
+            var v = document.createElement("div"); v.className = "ptp-stat-value" + (cls ? " " + cls : ""); v.textContent = value;
+            d.appendChild(l); d.appendChild(v); content.appendChild(d);
+        }
+
+        ptpStat("State",       state.charAt(0).toUpperCase() + state.slice(1), state === "locked" ? "good" : "warn");
+        ptpStat("Offset",      offsetStr || "—", offsetClass);
+        ptpStat("Grandmaster", grandmaster || "discovering\u2026", "");
+
+        // Update header pill
+        if (offsetStr) $("hdr-ptp").textContent = "PTP " + offsetStr;
+
+        // Draw sparkline
+        drawSparkline(_ptpHistory);
+
+    } catch (e) {
+        badge.className = "ptp-state-badge ptp-lost";
+        badge.textContent = "\u274C Error";
+        content.innerHTML = '<span class="text-danger">' + ((e && e.message) || String(e)) + '</span>';
+    }
+}
+
+function drawSparkline(pts) {
+    var svg = $("ptp-sparkline");
+    if (!svg || pts.length < 2) return;
+    svg.innerHTML = "";
+    var W = 300, H = 40, pad = 4;
+    var absMax = Math.max.apply(null, pts.map(Math.abs));
+    if (absMax === 0) absMax = 1;
+    function x(i) { return pad + (i / (pts.length - 1)) * (W - 2*pad); }
+    function y(v) { return pad + (1 - (v + absMax) / (2 * absMax)) * (H - 2*pad); }
+    var zero = y(0);
+
+    // Zero line
+    var zl = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    zl.setAttribute("x1", pad); zl.setAttribute("x2", W - pad);
+    zl.setAttribute("y1", zero); zl.setAttribute("y2", zero);
+    zl.setAttribute("class", "sparkline-zero"); svg.appendChild(zl);
+
+    // Area
+    var apts = pts.map(function(v,i){ return x(i) + "," + y(v); });
+    var area = [x(0) + "," + zero].concat(apts).concat([x(pts.length-1) + "," + zero]).join(" ");
+    var polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+    polygon.setAttribute("points", area); polygon.setAttribute("class", "sparkline-area"); svg.appendChild(polygon);
+
+    // Line
+    var polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", apts.join(" ")); polyline.setAttribute("class", "sparkline-line"); svg.appendChild(polyline);
+}
+
+// ── Health check panel ─────────────────────────────────────────────────────
+var HC_CHECKS = [
+    { id: "hc-snd-aloop",  name: "snd-aloop loaded",       fix: "loadAloop()" },
+    { id: "hc-sentinel",   name: "Deploy sentinel present", fix: null },
+    { id: "hc-ptp",        name: "PTP clock locked",        fix: null },
+    { id: "hc-bridge",     name: "inferno-bridge active",   fix: "svcAction('inferno-bridge','restart',false)" },
+    { id: "hc-librespot",  name: "librespot active",        fix: "svcAction('librespot','restart',false)" },
+    { id: "hc-statime",    name: "statime-inferno active",  fix: "svcAction('statime-inferno','restart',true)" },
+    { id: "hc-disk",       name: "Disk < 80% used",         fix: null },
+    { id: "hc-ip",         name: "NIC has IP address",      fix: null },
+];
+
+function hcRow(id, name, status, detail, fixFn) {
+    var row = document.createElement("div");
+    row.className = "hc-row " + status; row.id = id;
+    var icon = document.createElement("span"); icon.className = "hc-icon";
+    icon.textContent = status === "pass" ? "\u2705" : status === "fail" ? "\u274C" : status === "warn" ? "\u26A0\uFE0F" : "\u23F3";
+    var nameEl = document.createElement("span"); nameEl.className = "hc-name"; nameEl.textContent = name;
+    var detEl  = document.createElement("span"); detEl.className = "hc-detail"; detEl.textContent = detail;
+    row.appendChild(icon); row.appendChild(nameEl); row.appendChild(detEl);
+    if (fixFn && status === "fail") {
+        var fix = document.createElement("span"); fix.className = "hc-fix"; fix.textContent = "Fix";
+        fix.addEventListener("click", function() { eval(fixFn); }); // jshint ignore:line
+        row.appendChild(fix);
+    }
+    return row;
+}
+
+async function runHealthCheck() {
+    var btn = $("btn-health-check");
+    btn.disabled = true; btn.textContent = "\u23F3 Checking\u2026";
+    var results = $("hc-results");
+    results.innerHTML = "";
+
+    var pass = 0, fail = 0, warn = 0;
+
+    async function check(name, fn, fixFn) {
+        var placeholder = hcRow("", name, "running", "checking\u2026", null);
+        results.appendChild(placeholder);
+        var r;
+        try { r = await fn(); } catch (e) { r = { status: "fail", detail: String(e) }; }
+        placeholder.className = "hc-row " + r.status;
+        placeholder.querySelector(".hc-icon").textContent = r.status === "pass" ? "\u2705" : r.status === "fail" ? "\u274C" : r.status === "warn" ? "\u26A0\uFE0F" : "\u23F3";
+        placeholder.querySelector(".hc-detail").textContent = r.detail;
+        if (r.status === "fail" && fixFn) {
+            var fix = document.createElement("span"); fix.className = "hc-fix"; fix.textContent = "Fix";
+            fix.addEventListener("click", function() { eval(fixFn); }); // jshint ignore:line
+            placeholder.appendChild(fix);
+        }
+        if (r.status === "pass") pass++;
+        else if (r.status === "fail") fail++;
+        else if (r.status === "warn") warn++;
+    }
+
+    await check("snd-aloop loaded", async function() {
+        var o = await sp(["bash", "-c", "cat /proc/asound/cards | grep -i loopback | head -1"]);
+        return o.trim() ? { status: "pass", detail: o.trim() } : { status: "fail", detail: "not in /proc/asound/cards" };
+    }, "loadAloop()");
+
+    await check("Deploy sentinel present", async function() {
+        var o = await spSudo("test -f " + SENTINEL + " && echo ok || echo missing");
+        return o.trim() === "ok" ? { status: "pass", detail: SENTINEL } : { status: "warn", detail: "missing \u2014 will re-deploy on reboot" };
+    }, null);
+
+    await check("PTP clock locked", async function() {
+        var o = await spSudo("journalctl -u statime-inferno -n 40 --no-pager -o cat | grep -i locked | tail -1");
+        return o.trim() ? { status: "pass", detail: "locked" } : { status: "warn", detail: "not yet locked (may be syncing)" };
+    }, null);
+
+    await check("inferno-bridge active", async function() {
+        var o = await spUser("systemctl --user is-active inferno-bridge");
+        var s = o.trim();
+        return s === "active" ? { status: "pass", detail: "active" } : { status: "fail", detail: s };
+    }, "svcAction('inferno-bridge','restart',false)");
+
+    await check("librespot active", async function() {
+        var o = await spUser("systemctl --user is-active librespot");
+        var s = o.trim();
+        return s === "active" ? { status: "pass", detail: "active" } : { status: "warn", detail: s + " (only needed in spotify mode)" };
+    }, "svcAction('librespot','restart',false)");
+
+    await check("statime-inferno active", async function() {
+        var o = (await sp(["systemctl", "is-active", "statime-inferno"])).trim();
+        return o === "active" ? { status: "pass", detail: "active" } : { status: "fail", detail: o };
+    }, "svcAction('statime-inferno','restart',true)");
+
+    await check("Disk < 80% used", async function() {
+        var df = (await sp(["df", "/"])).trim().split("\n")[1].split(/\s+/);
+        var pct = parseInt(df[4]) || 0;
+        return pct < 80 ? { status: "pass", detail: df[4] + " used" } : { status: (pct < 95 ? "warn" : "fail"), detail: df[4] + " used \u2014 low space" };
+    }, null);
+
+    await check("NIC has IP address", async function() {
+        var nic = currentConf.INFERNO_NIC || "eno1";
+        var ip = (await sp(["bash", "-c", "ip -4 addr show " + nic + " 2>/dev/null | awk '/inet /{print $2}'"])).trim();
+        return ip ? { status: "pass", detail: ip + " on " + nic } : { status: "fail", detail: "no IPv4 on " + nic };
+    }, null);
+
+    // Summary badge
+    var summary = $("hc-summary");
+    if (fail > 0) { summary.textContent = fail + " failing"; summary.className = "hc-summary has-fail"; }
+    else if (warn > 0) { summary.textContent = warn + " warnings"; summary.className = "hc-summary has-warn"; }
+    else { summary.textContent = "\u2705 All good"; summary.className = "hc-summary all-pass"; }
+
+    btn.disabled = false; btn.textContent = "\u25B6 Run Checks";
+}
+
+// ── Dante device discovery ─────────────────────────────────────────────────
+async function scanDanteDevices() {
+    var btn     = $("btn-dante-scan");
+    var content = $("dante-devices-content");
+    btn.disabled = true; btn.textContent = "\u23F3 Scanning\u2026";
+    content.innerHTML = '<span class="loading-text">Scanning for Dante devices via mDNS\u2026</span>';
+    try {
+        // avahi-browse for _netaudio-arc._tcp (Dante ARC/device-info)
+        var raw = await sp(["avahi-browse", "-t", "-r", "-p", "_netaudio-arc._tcp"]);
+        var lines = (raw || "").split("\n").filter(function(l){ return l.startsWith("="); });
+        if (!lines.length) {
+            content.innerHTML = '<span class="loading-text">No Dante devices found on network.</span>';
+        } else {
+            content.innerHTML = "";
+            var seen = {};
+            lines.forEach(function(line) {
+                var parts = line.split(";");
+                // = ; iface ; proto ; name ; type ; domain ; host ; proto ; ip ; port ; txt
+                if (parts.length < 9) return;
+                var name = parts[3] || "?";
+                var ip   = parts[7] || "";
+                var host = parts[6] || "";
+                if (seen[name]) return;
+                seen[name] = true;
+                var row = document.createElement("div"); row.className = "dante-dev-row";
+                var nameEl = document.createElement("span"); nameEl.className = "dante-dev-name"; nameEl.textContent = name;
+                var ipEl   = document.createElement("span"); ipEl.className = "dante-dev-ip";   ipEl.textContent = ip;
+                var hostEl = document.createElement("span"); hostEl.className = "dante-dev-type"; hostEl.textContent = host;
+                row.appendChild(nameEl); row.appendChild(ipEl); row.appendChild(hostEl);
+                content.appendChild(row);
+            });
+        }
+    } catch (e) {
+        content.innerHTML = '<span class="text-muted">avahi-browse not available or no devices found.</span>';
+    }
+    btn.disabled = false; btn.textContent = "\u21BB Scan";
+}
+
+// ── Mode signal-flow diagram ───────────────────────────────────────────────
+function updateModeFlow() {
+    var div  = $("mode-flow-diagram");
+    var mode = $("cfg-mode").value;
+    div.innerHTML = "";
+    var flows = {
+        "spotify":   [["Spotify", "source"], ["snd-aloop", "middle"], ["inferno-bridge", "middle"], ["Dante TX", "dest"]],
+        "aux-in":    [["Analog In", "source"], ["snd-aloop", "middle"], ["inferno-aux-tx", "middle"], ["Dante TX", "dest"]],
+        "aux-out":   [["Dante RX", "source"], ["inferno-aux-rx", "middle"], ["Analog Out", "dest"]],
+        "aux-bidir": [["Analog In", "source"], ["Dante TX", "dest"], ["\u2194", "middle"], ["Dante RX", "source"], ["Analog Out", "dest"]],
+    };
+    var nodes = flows[mode] || [];
+    nodes.forEach(function(n, i) {
+        if (i > 0) {
+            var arr = document.createElement("span");
+            arr.className = "flow-arrow"; arr.textContent = " \u2192 ";
+            div.appendChild(arr);
+        }
+        var nd = document.createElement("span"); nd.className = "flow-node " + n[1]; nd.textContent = n[0];
+        div.appendChild(nd);
+    });
+}
+
 // ── Journal ────────────────────────────────────────────────────────────────────
-function colorizeLog(text) {
+function colorizeLog(text, levelFilter) {
     return text.split("\n").map(function(line) {
         var esc = line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
         var lo  = esc.toLowerCase();
-        if (/\berr(or)?\b|failed|fatal/.test(lo)) return '<span class="log-err">' + esc + "</span>";
-        if (/\bwarn/.test(lo))                    return '<span class="log-warn">' + esc + "</span>";
-        if (/\bok\b|success|ready|running|active|started/.test(lo)) return '<span class="log-ok">' + esc + "</span>";
+        var isErr  = /\berr(or)?\b|failed|fatal/.test(lo);
+        var isWarn = /\bwarn/.test(lo);
+        var isOk   = /\bok\b|success|ready|running|active|started/.test(lo);
+        if (levelFilter === "error" && !isErr)        return null;
+        if (levelFilter === "warn"  && !isErr && !isWarn) return null;
+        if (isErr)  return '<span class="log-err">'  + esc + "</span>";
+        if (isWarn) return '<span class="log-warn">' + esc + "</span>";
+        if (isOk)   return '<span class="log-ok">'   + esc + "</span>";
         return esc;
-    }).join("\n");
+    }).filter(function(l){ return l !== null; }).join("\n");
 }
 
 async function loadLog() {
-    var svc = $("log-svc-select").value;
-    var box = $("log-box");
+    var svc   = $("log-svc-select").value;
+    var lines = ($("log-lines-select") && $("log-lines-select").value) || "100";
+    var box   = $("log-box");
+    var levelFilter = ($("log-level-select") && $("log-level-select").value) || "all";
     box.textContent = "Loading\u2026";
+
+    // E-4: multi-service interleaved log
+    if (svc === "__all__") {
+        box.innerHTML = await loadAllServicesLog(lines, levelFilter);
+        box.scrollTop = box.scrollHeight;
+        return;
+    }
+
     var isSystem = SYSTEM_SVCS.includes(svc);
     try {
         var out;
         if (isSystem) {
-            // System service: use sudo -n journalctl
-            out = await spSudo("journalctl -u " + svc + " -n 100 --no-pager --output=short");
+            out = await spSudo("journalctl -u " + svc + " -n " + lines + " --no-pager --output=short");
         } else {
-            // User service: query via _SYSTEMD_USER_UNIT in system journal (no --user needed)
             out = await sp(["journalctl",
                 "_SYSTEMD_USER_UNIT=" + svc + ".service",
-                "-n", "100", "--no-pager", "--output=short"]);
+                "-n", lines, "--no-pager", "--output=short"]);
         }
-        box.innerHTML = colorizeLog(out || "(no output)");
+        box.innerHTML = colorizeLog(out || "(no output)", levelFilter);
         box.scrollTop = box.scrollHeight;
     } catch (e) {
         box.textContent = "Error: " + ((e && e.message) || String(e));
+    }
+}
+
+function exportLog() {
+    var box  = $("log-box");
+    var text = box.innerText || box.textContent;
+    var svc  = $("log-svc-select").value;
+    var blob = new Blob([text], { type: "text/plain" });
+    var a    = document.createElement("a");
+    a.href   = URL.createObjectURL(blob);
+    a.download = "inferno-" + svc + "-" + new Date().toISOString().slice(0,19).replace(/[T:]/g,"-") + ".log";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+}
+
+function toggleFollow() {
+    var btn = $("btn-log-follow");
+    if (_followTimer) {
+        clearInterval(_followTimer);
+        _followTimer = null;
+        btn.classList.remove("btn-follow-active");
+        btn.textContent = "\u25B6 Follow";
+    } else {
+        _followTimer = setInterval(function() {
+            loadLog().then(function() {
+                var box = $("log-box"); box.scrollTop = box.scrollHeight;
+            });
+        }, 2500);
+        btn.classList.add("btn-follow-active");
+        btn.textContent = "\u25A0 Stop";
+        toast("Live follow active (2.5 s poll)", "info", 3000);
     }
 }
 
@@ -983,9 +1504,332 @@ async function triggerReboot() {
     } catch (e) { toast("Reboot error: " + ((e && e.message) || String(e)), "error", 0); }
 }
 
+// ── Config export / import ─────────────────────────────────────────────────────
+function exportConfig() {
+    var text = buildConfText(currentConf);
+    var blob = new Blob([text], { type: "text/plain" });
+    var a    = document.createElement("a");
+    a.href   = URL.createObjectURL(blob);
+    a.download = "inferno.conf";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    toast("Config exported.", "success", 3000);
+}
+
+function importConfig(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var parsed = parseConf(e.target.result);
+        if (!parsed.INFERNO_MODE) {
+            toast("Invalid config file — INFERNO_MODE missing.", "error", 0);
+            return;
+        }
+        currentConf = parsed;
+        currentMode = parsed.INFERNO_MODE || "spotify";
+        $("cfg-mode").value = currentMode;
+        if (parsed.INFERNO_SPOTIFY_NAME) $("cfg-spotify-name").value = parsed.INFERNO_SPOTIFY_NAME;
+        if (parsed.INFERNO_DANTE_NAME)   $("cfg-dante-name").value   = parsed.INFERNO_DANTE_NAME;
+        if (parsed.INFERNO_NIC) populateNics(parsed.INFERNO_NIC);
+        if (parsed.INFERNO_TX_CHANNELS)  $("cfg-tx-channels").value  = parsed.INFERNO_TX_CHANNELS;
+        if (parsed.INFERNO_RX_CHANNELS)  $("cfg-rx-channels").value  = parsed.INFERNO_RX_CHANNELS;
+        if (parsed.INFERNO_LOOP_LATENCY) {
+            $("cfg-loop-latency").value = parsed.INFERNO_LOOP_LATENCY;
+            $("cfg-loop-latency-val").textContent = Math.round(parseInt(parsed.INFERNO_LOOP_LATENCY)/1000) + " ms";
+        }
+        onModeChange();
+        markDirty();
+        toast("Config imported — review and click Save & Apply.", "info", 6000);
+    };
+    reader.readAsText(file);
+}
+
+// ── Auto-refresh interval control ─────────────────────────────────────────────
+function setRefreshInterval(ms) {
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    if (ms > 0) _refreshTimer = setInterval(refreshServices, ms);
+}
+
+// ── Collapsible card toggle ────────────────────────────────────────────────────
+function toggleCard(cardId) {
+    var card = $(cardId);
+    if (!card) return;
+    card.classList.toggle("collapsed");
+    var collapsed = card.classList.contains("collapsed");
+    try { localStorage.setItem("inferno-collapsed-" + cardId, collapsed ? "1" : "0"); } catch (_) {}
+}
+
+function restoreCollapsed() {
+    ["card-audio-devices","card-volume","card-dante","card-journal"].forEach(function(id) {
+        try {
+            if (localStorage.getItem("inferno-collapsed-" + id) === "1") {
+                var card = $(id);
+                if (card) card.classList.add("collapsed");
+            }
+        } catch (_) {}
+    });
+}
+
+// ── Keyboard shortcuts ─────────────────────────────────────────────────────────
+function initKeyboardShortcuts() {
+    document.addEventListener("keydown", function(e) {
+        var tag = (e.target.tagName || "").toUpperCase();
+        if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        switch (e.key) {
+            case "r": case "R": e.preventDefault(); refreshAll(); break;
+            case "s": case "S": if (isDirty) { e.preventDefault(); saveConfig(); } break;
+            case "j": case "J": e.preventDefault(); loadLog(); break;
+            case "Escape":
+                document.querySelectorAll(".toast").forEach(function(t){ t.remove(); });
+                if (_followTimer) toggleFollow();
+                break;
+        }
+    });
+}
+
+// ── Tab navigation (I-3) ──────────────────────────────────────────────────────
+var _activeTab = "tab-services";
+
+function switchTab(tabId) {
+    document.querySelectorAll(".tab-panel").forEach(function(p) {
+        p.classList.add("tab-panel-hidden");
+    });
+    document.querySelectorAll(".tab-btn").forEach(function(b) {
+        b.classList.remove("tab-btn-active");
+    });
+    var panel = $(tabId);
+    if (panel) panel.classList.remove("tab-panel-hidden");
+    var btn = document.querySelector('[data-tab="' + tabId + '"]');
+    if (btn) btn.classList.add("tab-btn-active");
+    _activeTab = tabId;
+    try { localStorage.setItem("inferno-active-tab", tabId); } catch (_) {}
+}
+
+function initTabs() {
+    document.querySelectorAll(".tab-btn").forEach(function(btn) {
+        btn.addEventListener("click", function() { switchTab(this.dataset.tab); });
+    });
+    try {
+        var saved = localStorage.getItem("inferno-active-tab");
+        if (saved && $(saved)) switchTab(saved);
+    } catch (_) {}
+}
+
+// ── Restart All with per-service progress (B-4) ───────────────────────────────
+async function restartAll() {
+    var svcs     = activeSvcs();
+    var progress = $("restart-progress");
+    progress.innerHTML = "";
+    progress.classList.remove("hidden");
+
+    var items = {};
+    svcs.forEach(function(svc) {
+        var row   = document.createElement("div"); row.className = "restart-progress-item";
+        var icon  = document.createElement("span"); icon.className  = "restart-progress-icon";  icon.textContent  = "⏳";
+        var name  = document.createElement("span"); name.className  = "restart-progress-name";  name.textContent  = SVC_LABELS[svc] ? SVC_LABELS[svc].label : svc;
+        var state = document.createElement("span"); state.className = "restart-progress-state"; state.textContent = "waiting…";
+        row.appendChild(icon); row.appendChild(name); row.appendChild(state);
+        progress.appendChild(row);
+        items[svc] = { icon: icon, state: state };
+    });
+
+    var anyFail = false;
+    for (var i = 0; i < svcs.length; i++) {
+        var svc = svcs[i];
+        items[svc].icon.textContent  = "⟳";
+        items[svc].state.textContent = "restarting…";
+        try {
+            if (SYSTEM_SVCS.includes(svc)) {
+                await spSudo("systemctl restart " + svc);
+            } else {
+                await spUser("systemctl --user restart " + svc);
+            }
+            items[svc].icon.textContent  = "✅";
+            items[svc].state.textContent = "restarted";
+        } catch (e) {
+            items[svc].icon.textContent  = "❌";
+            items[svc].state.textContent = "failed: " + ((e && e.message) || String(e));
+            anyFail = true;
+        }
+    }
+
+    toast(anyFail ? "Restart complete with errors." : "All services restarted.", anyFail ? "error" : "success", 5000);
+    await refreshServices();
+    setTimeout(function() { progress.classList.add("hidden"); progress.innerHTML = ""; }, 8000);
+}
+
+// ── Config change diff modal (F-2) ────────────────────────────────────────────
+var _savedConfSnapshot = {};
+
+function buildFormSnapshot() {
+    return {
+        INFERNO_MODE:         $("cfg-mode").value,
+        INFERNO_SPOTIFY_NAME: $("cfg-spotify-name").value,
+        INFERNO_DANTE_NAME:   $("cfg-dante-name").value,
+        INFERNO_NIC:          $("cfg-nic").value,
+        INFERNO_TX_CHANNELS:  $("cfg-tx-channels").value,
+        INFERNO_RX_CHANNELS:  $("cfg-rx-channels").value,
+        INFERNO_LOOP_LATENCY: $("cfg-loop-latency").value,
+        LIBRESPOT_BITRATE:    $("cfg-librespot-bitrate").value,
+        LIBRESPOT_NORMALIZE:  $("cfg-librespot-normalize").value,
+    };
+}
+
+var _pendingSaveResolve = null;
+
+function showConfigDiff() {
+    return new Promise(function(resolve) {
+        var current = buildFormSnapshot();
+        var labels  = {
+            INFERNO_MODE:         "Mode",
+            INFERNO_SPOTIFY_NAME: "Spotify Name",
+            INFERNO_DANTE_NAME:   "Dante TX Name",
+            INFERNO_NIC:          "Interface",
+            INFERNO_TX_CHANNELS:  "TX Channels",
+            INFERNO_RX_CHANNELS:  "RX Channels",
+            INFERNO_LOOP_LATENCY: "Loop Latency (µs)",
+            LIBRESPOT_BITRATE:    "Bitrate",
+            LIBRESPOT_NORMALIZE:  "Normalise",
+        };
+        var diffRows = [];
+        Object.keys(labels).forEach(function(k) {
+            var oldVal = ((_savedConfSnapshot[k] !== undefined ? _savedConfSnapshot[k] : "") + "");
+            var newVal = ((current[k]            !== undefined ? current[k]            : "") + "");
+            if (oldVal !== newVal) diffRows.push({ label: labels[k], oldVal: oldVal || "(none)", newVal: newVal || "(none)" });
+        });
+
+        if (diffRows.length === 0) { resolve(true); return; }
+
+        var table = $("cfg-diff-table");
+        table.innerHTML = "<thead><tr><th>Setting</th><th>Current</th><th>New value</th></tr></thead>";
+        var tbody = document.createElement("tbody");
+        diffRows.forEach(function(r) {
+            var tr  = document.createElement("tr");
+            var td1 = document.createElement("td"); td1.textContent = r.label;
+            var td2 = document.createElement("td"); td2.className = "diff-old"; td2.textContent = r.oldVal;
+            var td3 = document.createElement("td"); td3.className = "diff-new"; td3.textContent = r.newVal;
+            tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+
+        _pendingSaveResolve = resolve;
+        $("cfg-diff-modal").showModal();
+    });
+}
+
+// ── Multi-service interleaved journal (E-4) ───────────────────────────────────
+async function loadAllServicesLog(lines, levelFilter) {
+    var svcs = activeSvcs();
+    var results = await Promise.all(svcs.map(async function(svc) {
+        try {
+            var out;
+            if (SYSTEM_SVCS.includes(svc)) {
+                out = await spSudo("journalctl -u " + svc + " -n " + lines + " --no-pager --output=short");
+            } else {
+                out = await sp(["journalctl", "_SYSTEMD_USER_UNIT=" + svc + ".service",
+                    "-n", lines, "--no-pager", "--output=short"]);
+            }
+            return { svc: svc, text: out || "" };
+        } catch (_) { return { svc: svc, text: "" }; }
+    }));
+
+    var shortLabels = {
+        "librespot":             "librespot", "librespot-watchdog": "watchdog",
+        "inferno-bridge":        "bridge",    "inferno-keepalive":  "keepalive",
+        "inferno-aux-tx":        "aux-tx",    "inferno-aux-rx":     "aux-rx",
+        "inferno-aux-keepalive": "aux-ka",    "statime-inferno":    "statime",
+    };
+
+    var allLines = [];
+    results.forEach(function(r) {
+        r.text.split("\n").forEach(function(line) {
+            if (!line.trim()) return;
+            var ts = line.length >= 15 ? line.substring(0, 15) : line;
+            allLines.push({ ts: ts, svc: r.svc, line: line });
+        });
+    });
+    allLines.sort(function(a, b) { return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0; });
+
+    return allLines.map(function(entry) {
+        var tag = shortLabels[entry.svc] || entry.svc;
+        var esc = entry.line.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+        var lo  = esc.toLowerCase();
+        var isErr  = /\berr(or)?\b|failed|fatal/.test(lo);
+        var isWarn = /\bwarn/.test(lo);
+        var isOk   = /\bok\b|success|ready|running|active|started/.test(lo);
+        if (levelFilter === "error" && !isErr)            return null;
+        if (levelFilter === "warn"  && !isErr && !isWarn) return null;
+        var prefix = '<span class="log-svc-tag">[' + tag + ']</span> ';
+        var body   = isErr  ? '<span class="log-err">'  + esc + "</span>" :
+                     isWarn ? '<span class="log-warn">' + esc + "</span>" :
+                     isOk   ? '<span class="log-ok">'   + esc + "</span>" : esc;
+        return prefix + body;
+    }).filter(function(l) { return l !== null; }).join("\n");
+}
+
+// ── Audio Level Monitor (G-1) — polls ALSA mixer controls ────────────────────
+var _peakTimer = null;
+
+async function refreshPeakMeters() {
+    var container = $("peak-meters-content");
+    try {
+        var out = await sp(["bash", "-c", "amixer -D default scontents 2>/dev/null || amixer scontents 2>/dev/null"]);
+        if (!out || !out.trim()) {
+            container.innerHTML = '<span class="loading-text">No ALSA mixer controls found.</span>';
+            return;
+        }
+        var controls = [];
+        out.split(/^Simple mixer control /m).filter(Boolean).forEach(function(block) {
+            var nameMatch = block.match(/^'([^']+)'/);
+            if (!nameMatch) return;
+            var vols = [];
+            var re = /(\d+)%/g;
+            var m;
+            while ((m = re.exec(block)) !== null) vols.push(parseInt(m[1]));
+            if (vols.length === 0) return;
+            var avg = Math.round(vols.reduce(function(a,b){return a+b;},0) / vols.length);
+            controls.push({ name: nameMatch[1], pct: avg });
+        });
+        if (controls.length === 0) {
+            container.innerHTML = '<span class="loading-text">No volume data available.</span>';
+            return;
+        }
+        container.innerHTML = "";
+        controls.forEach(function(c) {
+            var row  = document.createElement("div"); row.className = "peak-row";
+            var lbl  = document.createElement("span"); lbl.className = "peak-label"; lbl.textContent = c.name; lbl.title = c.name;
+            var wrap = document.createElement("div"); wrap.className = "peak-bar-wrap";
+            var bar  = document.createElement("div"); bar.className = "peak-bar"; bar.style.width = c.pct + "%";
+            wrap.appendChild(bar);
+            var pct  = document.createElement("span"); pct.className = "peak-pct"; pct.textContent = c.pct + "%";
+            row.appendChild(lbl); row.appendChild(wrap); row.appendChild(pct);
+            container.appendChild(row);
+        });
+    } catch (e) {
+        container.innerHTML = '<span class="loading-text">amixer unavailable: ' + ((e && e.message) || String(e)) + '</span>';
+    }
+}
+
+function togglePeakMonitor() {
+    var btn = $("btn-peak-toggle");
+    if (_peakTimer) {
+        clearInterval(_peakTimer);
+        _peakTimer = null;
+        btn.textContent = "\u25B6 Start Monitor";
+        toast("Level monitor stopped.", "info", 2000);
+    } else {
+        refreshPeakMeters();
+        _peakTimer = setInterval(refreshPeakMeters, 2000);
+        btn.textContent = "\u25A0 Stop Monitor";
+        toast("Level monitor active (2 s poll).", "info", 2000);
+    }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function refreshAll() {
-    await Promise.all([refreshServices(), refreshSystemInfo()]);
+    await Promise.all([refreshServices(), refreshSystemInfo(), refreshPTP()]);
     refreshHeader();
 }
 
@@ -996,7 +1840,12 @@ async function init() {
         USER_HOME = u.home || "/var/home/core";
     } catch (_) {}
 
-    // Wire all event listeners here (CSP blocks inline onclick/onchange in HTML)
+    // A-1: Unsaved-changes guard
+    window.addEventListener("beforeunload", function(e) {
+        if (isDirty) { e.preventDefault(); e.returnValue = ""; }
+    });
+
+    // Wire all event listeners (CSP blocks inline onclick/onchange in HTML)
     $("btn-refresh").addEventListener("click", refreshAll);
     $("btn-restart-all").addEventListener("click", restartAll);
     $("btn-save").addEventListener("click", saveConfig);
@@ -1004,6 +1853,11 @@ async function init() {
     $("btn-redeploy").addEventListener("click", triggerRedeploy);
     $("btn-reboot").addEventListener("click", triggerReboot);
     $("log-svc-select").addEventListener("change", loadLog);
+    $("log-level-select").addEventListener("change", loadLog);
+    $("log-lines-select").addEventListener("change", loadLog);
+    $("btn-log-follow").addEventListener("click", toggleFollow);
+    $("btn-log-export").addEventListener("click", exportLog);
+
     $("cfg-mode").addEventListener("change", function() { onModeChange(); markDirty(); });
     $("cfg-audio-in").addEventListener("change", markDirty);
     $("cfg-audio-in2").addEventListener("change", markDirty);
@@ -1012,10 +1866,64 @@ async function init() {
     $("cfg-nic").addEventListener("change", markDirty);
     $("cfg-tx-channels").addEventListener("change", function() { onChannelChange(); markDirty(); });
     $("cfg-rx-channels").addEventListener("change", function() { onChannelChange(); markDirty(); });
-    $("btn-audio-devices").addEventListener("click", refreshAudioDevices);
-    $("btn-vol-normalize").addEventListener("click", normalizeAllVolumes);
     $("cfg-spotify-name").addEventListener("input", markDirty);
     $("cfg-dante-name").addEventListener("input", markDirty);
+    $("cfg-librespot-bitrate").addEventListener("change", markDirty);
+    $("cfg-librespot-normalize").addEventListener("change", markDirty);
+    $("cfg-loop-latency").addEventListener("input", function() {
+        $("cfg-loop-latency-val").textContent = Math.round(parseInt(this.value)/1000) + " ms";
+        markDirty();
+    });
+
+    $("btn-audio-devices").addEventListener("click", refreshAudioDevices);
+    $("btn-vol-normalize").addEventListener("click", normalizeAllVolumes);
+
+    // Config export/import
+    $("btn-cfg-export").addEventListener("click", exportConfig);
+    $("btn-cfg-import").addEventListener("click", function() { $("cfg-import-file").click(); });
+    $("cfg-import-file").addEventListener("change", function() { importConfig(this.files[0]); this.value = ""; });
+
+    // PTP refresh
+    $("btn-ptp-refresh").addEventListener("click", refreshPTP);
+
+    // Health check
+    $("btn-health-check").addEventListener("click", runHealthCheck);
+
+    // Dante discovery
+    $("btn-dante-scan").addEventListener("click", scanDanteDevices);
+
+    // Auto-refresh interval
+    $("svc-refresh-select").addEventListener("change", function() {
+        setRefreshInterval(parseInt(this.value));
+    });
+
+    // Collapsible cards
+    $("btn-collapse-audio").addEventListener("click",   function() { toggleCard("card-audio-devices"); });
+    $("btn-collapse-volume").addEventListener("click",  function() { toggleCard("card-volume"); });
+    $("btn-collapse-dante").addEventListener("click",   function() { toggleCard("card-dante"); });
+    $("btn-collapse-journal").addEventListener("click", function() { toggleCard("card-journal"); });
+    $("btn-collapse-peak").addEventListener("click",    function() { toggleCard("card-peak-meters"); });
+    restoreCollapsed();
+
+    // Tab navigation (I-3)
+    initTabs();
+
+    // Audio level monitor (G-1)
+    $("btn-peak-toggle").addEventListener("click", togglePeakMonitor);
+
+    // Config diff modal confirm/cancel (F-2)
+    $("btn-diff-confirm").addEventListener("click", function() {
+        $("cfg-diff-modal").close();
+        if (_pendingSaveResolve) { _pendingSaveResolve(true); _pendingSaveResolve = null; }
+    });
+    $("btn-diff-cancel").addEventListener("click", function() {
+        $("cfg-diff-modal").close();
+        if (_pendingSaveResolve) { _pendingSaveResolve(false); _pendingSaveResolve = null; }
+        toast("Save cancelled.", "info", 2000);
+    });
+
+    // Keyboard shortcuts
+    initKeyboardShortcuts();
 
     await loadConfig();
     refreshHeader();
@@ -1023,7 +1931,11 @@ async function init() {
     await loadLog();
     refreshAudioDevices();
     loadVolumes();
+
+    // Start auto-refresh (default 20s)
+    setRefreshInterval(20000);
+    // Initial PTP poll
+    refreshPTP().catch(function(){});
 }
 
 init().catch(function(e) { toast("Init error: " + String(e), "error", 0); });
-setInterval(refreshServices, 20000);
