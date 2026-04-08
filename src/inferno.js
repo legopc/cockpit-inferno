@@ -2314,11 +2314,6 @@ const FirstLoginWizard = {
             if (content === null) self.show();
         });
 
-        // "Remind me later" — close without writing sentinel
-        $('flw-btn-skip').addEventListener('click', function() {
-            self.dialog.close();
-        });
-
         // Back button
         $('flw-btn-back').addEventListener('click', function() {
             if (self.currentStep > 0) {
@@ -2414,7 +2409,7 @@ FirstLoginWizard.addStep({
     },
     onComplete: function() {
         var nw = ($('flw-new-pass') || {}).value || '';
-        return cockpit.spawn(['chpasswd'], { superuser: 'require', err: 'message' })
+        return cockpit.spawn(['sudo', '-n', 'chpasswd'], { err: 'message', environ: userEnv() })
             .input('core:' + nw);
     }
 });
