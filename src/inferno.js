@@ -1509,7 +1509,7 @@ async function scanDanteDevices() {
         // timeout(8) kills it after 8 s; -r resolves IPs; -p gives parsable output.
         // Parsable "=" resolved line format:
         //   = ; iface ; proto ; name ; type ; domain ; host ; addr-type ; addr(IP) ; port ; txt
-        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._tcp"],
+        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._udp"],
                                       { err: "ignore" });
         var lines = (raw || "").split("\n").filter(function(l){ return l.startsWith("="); });
         var seen = {};
@@ -2075,7 +2075,6 @@ const DiagnosticsTab = {
         $("diag-ptp-collect-btn").addEventListener("click", () => this.collectPtp());
         $("diag-ptp-export-btn").addEventListener("click", () => this.exportPtpCsv());
         $("diag-alsa-refresh-btn").addEventListener("click", () => this.refreshAlsa());
-        $("diag-dante-refresh-btn").addEventListener("click", () => this.refreshDante());
         $("diag-bench-run-btn").addEventListener("click", () => this.runBench());
     },
 
@@ -2193,25 +2192,6 @@ const DiagnosticsTab = {
         content.innerHTML = '<span class="loading-text">Checking ALSA…</span>';
 
         const benchPath = "/usr/local/sbin/inferno-bench/alsa-health.sh";
-        let output = "";
-        const proc = cockpit.spawn([benchPath], { superuser: "try", err: "message" });
-        proc.stream(data => { output += data; });
-        proc.then(() => {
-            content.innerHTML = '<pre class="diag-pre">' + this._escHtml(output) + "</pre>";
-            btn.disabled = false;
-        }).catch(err => {
-            content.innerHTML = '<span class="error">' + this._escHtml(err.message || String(err)) + "</span>";
-            btn.disabled = false;
-        });
-    },
-
-    refreshDante() {
-        const btn = $("diag-dante-refresh-btn");
-        const content = $("diag-dante-content");
-        btn.disabled = true;
-        content.innerHTML = '<span class="loading-text">Discovering Dante devices…</span>';
-
-        const benchPath = "/usr/local/sbin/inferno-bench/dante-network-bench.sh";
         let output = "";
         const proc = cockpit.spawn([benchPath], { superuser: "try", err: "message" });
         proc.stream(data => { output += data; });
