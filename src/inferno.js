@@ -570,6 +570,8 @@ const IRADIO_PID_BASE     = 10; // slots 1..4 → PIDs 10..13
 
 async function ensureIradioSetup(danteName, numChannels) {
     numChannels = numChannels || 2; // default 2 stereo pairs
+    // Stop iradio-bridge before rewriting files so Dante plugin reregisters cleanly
+    await spUser("systemctl --user stop iradio-bridge 2>/dev/null; true");
     var asoundText = await cockpit.file(ASOUNDRC).read() || "";
 
     var bindIpMatch   = asoundText.match(/BIND_IP\s+(\S+)/);
