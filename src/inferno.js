@@ -2072,8 +2072,7 @@ const DiagnosticsTab = {
         );
 
         proc.stream(data => {
-            status.textContent = data.trim().split("
-").pop() || "Collecting…";
+            status.textContent = data.trim().split("\n").pop() || "Collecting…";
         });
 
         proc.then(() => {
@@ -2158,8 +2157,7 @@ const DiagnosticsTab = {
             const ns = typeof v === "number" ? v : (v.offsetNs || v.offset || 0);
             lines.push(i + "," + ns);
         });
-        const blob = new Blob([lines.join("
-")], { type: "text/csv" });
+        const blob = new Blob([lines.join("\n")], { type: "text/csv" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url; a.download = "inferno-ptp.csv"; a.click();
@@ -2235,8 +2233,7 @@ const DiagnosticsTab = {
             btn.textContent = "▶ Run Benchmark";
             actionsEl.style.display = "block";
         }).catch(err => {
-            outputEl.textContent += "
-Error: " + (err.message || err);
+            outputEl.textContent += "\nError: " + (err.message || err);
             btn.disabled = false;
             btn.textContent = "▶ Run Benchmark";
         });
