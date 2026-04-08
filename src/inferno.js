@@ -1502,33 +1502,55 @@ async function runHealthCheck() {
 async function scanDanteDevices() {
     var btn     = $("btn-dante-scan");
     var content = $("dante-devices-content");
-    btn.disabled = true; btn.textContent = "\u23F3 Scanning\u2026";
-    content.innerHTML = '<span class="loading-text">Scanning for Dante devices via mDNS\u2026</span>';
+    btn.disabled = true; btn.textContent = "\u23F3 Scanning\u2026 (8s)";
+    content.innerHTML = '<span class="loading-text">Scanning for Dante devices via mDNS — please wait\u2026</span>';
     try {
-        // avahi-browse for _netaudio-arc._tcp (Dante ARC/device-info)
-        var raw = await sp(["avahi-browse", "-t", "-r", "-p", "_netaudio-arc._tcp"]);
+        // Run avahi-browse without -t so it browses for the full timeout period.
+        // timeout(8) kills it after 8 s; -r resolves IPs; -p gives parsable output.
+        // Parsable "=" resolved line format:
+        //   = ; iface ; proto ; name ; type ; domain ; host ; addr-type ; addr(IP) ; port ; txt
+        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._tcp"],
+                                      { err: "ignore" });
         var lines = (raw || "").split("\n").filter(function(l){ return l.startsWith("="); });
-        if (!lines.length) {
+        var seen = {};
+        var devices = [];
+        lines.forEach(function(line) {
+            var parts = line.split(";");
+            if (parts.length < 9) return;
+            var name = parts[3] || "?";
+            var host = parts[6] || "";
+            var ip   = parts[8] || "";    // parts[8] is the resolved IP (parts[7] is addr-type)
+            var port = parts[9] || "";
+            if (seen[name]) return;
+            seen[name] = true;
+            // skip IPv6 duplicates — prefer IPv4 entries
+            if (ip.indexOf(":") !== -1) return;
+            devices.push({ name: name, ip: ip, host: host, port: port });
+        });
+
+        if (!devices.length) {
             content.innerHTML = '<span class="loading-text">No Dante devices found on network.</span>';
         } else {
             content.innerHTML = "";
-            var seen = {};
-            lines.forEach(function(line) {
-                var parts = line.split(";");
-                // = ; iface ; proto ; name ; type ; domain ; host ; proto ; ip ; port ; txt
-                if (parts.length < 9) return;
-                var name = parts[3] || "?";
-                var ip   = parts[7] || "";
-                var host = parts[6] || "";
-                if (seen[name]) return;
-                seen[name] = true;
+            // Header row
+            var hdr = document.createElement("div");
+            hdr.className = "dante-dev-row dante-dev-header";
+            hdr.innerHTML = '<span class="dante-dev-name">Device</span>' +
+                            '<span class="dante-dev-ip">IP Address</span>' +
+                            '<span class="dante-dev-host">Hostname</span>';
+            content.appendChild(hdr);
+            devices.forEach(function(d) {
                 var row = document.createElement("div"); row.className = "dante-dev-row";
-                var nameEl = document.createElement("span"); nameEl.className = "dante-dev-name"; nameEl.textContent = name;
-                var ipEl   = document.createElement("span"); ipEl.className = "dante-dev-ip";   ipEl.textContent = ip;
-                var hostEl = document.createElement("span"); hostEl.className = "dante-dev-type"; hostEl.textContent = host;
+                var nameEl = document.createElement("span"); nameEl.className = "dante-dev-name"; nameEl.textContent = d.name;
+                var ipEl   = document.createElement("span"); ipEl.className = "dante-dev-ip";   ipEl.textContent = d.ip + (d.port ? ":" + d.port : "");
+                var hostEl = document.createElement("span"); hostEl.className = "dante-dev-host"; hostEl.textContent = d.host;
                 row.appendChild(nameEl); row.appendChild(ipEl); row.appendChild(hostEl);
                 content.appendChild(row);
             });
+            var count = document.createElement("div");
+            count.className = "dante-dev-count";
+            count.textContent = devices.length + " device" + (devices.length !== 1 ? "s" : "") + " found";
+            content.appendChild(count);
         }
     } catch (e) {
         content.innerHTML = '<span class="text-muted">avahi-browse not available or no devices found.</span>';

@@ -309,11 +309,16 @@ body {
 /* ── Dante discovery ─────────────────────────────────────────────────────── */
 .dante-dev-row {
   display: flex; align-items: center; gap: 10px; padding: 8px 10px;
-  border: 1px solid #e8e8e8; border-radius: 5px; margin-bottom: 6px; font-size: 0.83rem;
+  border: 1px solid #e8e8e8; border-radius: 5px; margin-bottom: 4px; font-size: 0.83rem;
 }
-.dante-dev-name { font-weight: 600; flex: 1; }
-.dante-dev-type { font-size: 0.72rem; color: #6a6e73; }
-.dante-dev-ip   { font-family: monospace; font-size: 0.78rem; color: #333; }
+.dante-dev-header {
+  background: #f5f5f5; font-weight: 600; font-size: 0.75rem; text-transform: uppercase;
+  letter-spacing: 0.04em; color: #555; border-color: #ddd;
+}
+.dante-dev-name { font-weight: 600; flex: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dante-dev-ip   { font-family: monospace; font-size: 0.78rem; color: #333; flex: 1.2; white-space: nowrap; }
+.dante-dev-host { font-size: 0.76rem; color: #6a6e73; flex: 1.5; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dante-dev-count { margin-top: 6px; font-size: 0.75rem; color: #6a6e73; text-align: right; }
 
 /* ── Mode signal-flow diagram ────────────────────────────────────────────── */
 .mode-flow {
