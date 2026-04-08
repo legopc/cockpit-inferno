@@ -2262,6 +2262,20 @@ const FirstLoginWizard = {
     _showParentOverlay: function() {
         try {
             if (window.parent && window.parent.document && !window.parent.document.getElementById('inferno-flw-blocker')) {
+                // Elevate our own iframe above the overlay so the dialog remains interactive.
+                // The overlay (z-index:9998) dims/blocks Cockpit nav; our iframe sits above it.
+                var frames = window.parent.document.querySelectorAll('iframe');
+                for (var i = 0; i < frames.length; i++) {
+                    try {
+                        if (frames[i].contentWindow === window) {
+                            frames[i].setAttribute('data-flw-z', frames[i].style.zIndex || '');
+                            frames[i].setAttribute('data-flw-pos', frames[i].style.position || '');
+                            frames[i].style.position = 'relative';
+                            frames[i].style.zIndex = '10000';
+                            break;
+                        }
+                    } catch(e2) {}
+                }
                 var ov = window.parent.document.createElement('div');
                 ov.id = 'inferno-flw-blocker';
                 ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:9998;background:rgba(0,0,0,0.55);pointer-events:all;';
@@ -2275,6 +2289,19 @@ const FirstLoginWizard = {
             if (window.parent && window.parent.document) {
                 var ov = window.parent.document.getElementById('inferno-flw-blocker');
                 if (ov) ov.parentNode.removeChild(ov);
+                // Restore iframe z-index
+                var frames = window.parent.document.querySelectorAll('iframe');
+                for (var i = 0; i < frames.length; i++) {
+                    try {
+                        if (frames[i].contentWindow === window) {
+                            frames[i].style.zIndex = frames[i].getAttribute('data-flw-z') || '';
+                            frames[i].style.position = frames[i].getAttribute('data-flw-pos') || '';
+                            frames[i].removeAttribute('data-flw-z');
+                            frames[i].removeAttribute('data-flw-pos');
+                            break;
+                        }
+                    } catch(e2) {}
+                }
             }
         } catch(e) {}
     },
