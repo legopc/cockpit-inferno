@@ -2259,9 +2259,30 @@ const FirstLoginWizard = {
 
     addStep: function(step) { this.steps.push(step); },
 
+    _showParentOverlay: function() {
+        try {
+            if (window.parent && window.parent.document && !window.parent.document.getElementById('inferno-flw-blocker')) {
+                var ov = window.parent.document.createElement('div');
+                ov.id = 'inferno-flw-blocker';
+                ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:9998;background:rgba(0,0,0,0.55);pointer-events:all;';
+                window.parent.document.body.appendChild(ov);
+            }
+        } catch(e) {}
+    },
+
+    _hideParentOverlay: function() {
+        try {
+            if (window.parent && window.parent.document) {
+                var ov = window.parent.document.getElementById('inferno-flw-blocker');
+                if (ov) ov.parentNode.removeChild(ov);
+            }
+        } catch(e) {}
+    },
+
     show: function() {
         this.currentStep = 0;
         this._renderStep();
+        this._showParentOverlay();
         this.dialog.showModal();
     },
 
@@ -2296,10 +2317,12 @@ const FirstLoginWizard = {
         var self = this;
         spSudo('mkdir -p /var/lib/inferno && sudo -n touch ' + self.sentinel)
         .then(function() {
+            self._hideParentOverlay();
             self.dialog.close();
             toast('Password changed — setup complete.', 'success', 4000);
         }).catch(function(err) {
             // Sentinel write failed — still close (non-fatal)
+            self._hideParentOverlay();
             self.dialog.close();
             toast('Password changed. (Note: could not write sentinel: ' + String(err) + ')', 'warning', 6000);
         });
@@ -2312,6 +2335,12 @@ const FirstLoginWizard = {
         // Sentinel check — show wizard only if sentinel absent
         cockpit.file(self.sentinel).read().then(function(content) {
             if (content === null) self.show();
+        });
+
+        // "Remind me later" — close without writing sentinel, remove parent overlay
+        $('flw-btn-skip').addEventListener('click', function() {
+            self._hideParentOverlay();
+            self.dialog.close();
         });
 
         // Back button
