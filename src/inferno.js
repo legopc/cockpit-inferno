@@ -2251,73 +2251,18 @@ const DiagnosticsTab = {
 const FirstLoginWizard = {
     sentinel: '/var/lib/inferno/.first-login-done',
     currentStep: 0,
+    dialog: null,
 
     // Each step: { id, title, description, render(el), validate() → string|null, onComplete() → Promise }
-    steps: [
-        {
-            id: 'change-password',
-            title: 'Change Default Password',
-            description: 'For security, please change the default password for the core account before continuing.',
-            render: function(el) {
-                var frag = document.createDocumentFragment();
+    // Use addStep() to register steps so future callers extend without touching this object.
+    steps: [],
 
-                var title = document.createElement('div');
-                title.className = 'flw-step-title';
-                title.textContent = this.title;
-                frag.appendChild(title);
-
-                var desc = document.createElement('div');
-                desc.className = 'flw-step-desc';
-                desc.textContent = this.description;
-                frag.appendChild(desc);
-
-                ['flw-current-pass', 'flw-new-pass', 'flw-confirm-pass'].forEach(function(id, i) {
-                    var labels = ['Current password', 'New password', 'Confirm new password'];
-                    var field = document.createElement('div');
-                    field.className = 'flw-field';
-                    var lbl = document.createElement('label');
-                    lbl.setAttribute('for', id);
-                    lbl.textContent = labels[i];
-                    var inp = document.createElement('input');
-                    inp.type = 'password';
-                    inp.id = id;
-                    inp.autocomplete = (i === 0) ? 'current-password' : 'new-password';
-                    field.appendChild(lbl);
-                    field.appendChild(inp);
-                    frag.appendChild(field);
-                });
-
-                var errDiv = document.createElement('div');
-                errDiv.className = 'flw-error';
-                errDiv.id = 'flw-error-msg';
-                frag.appendChild(errDiv);
-
-                el.appendChild(frag);
-            },
-            validate: function() {
-                var cur  = ($('flw-current-pass')  || {}).value || '';
-                var nw   = ($('flw-new-pass')       || {}).value || '';
-                var conf = ($('flw-confirm-pass')   || {}).value || '';
-                if (!cur)           return 'Please enter your current password.';
-                if (nw.length < 8)  return 'New password must be at least 8 characters.';
-                if (nw !== conf)    return 'New passwords do not match.';
-                if (nw === cur)     return 'New password must differ from the current password.';
-                return null;
-            },
-            onComplete: function() {
-                var nw = ($('flw-new-pass') || {}).value || '';
-                var proc = cockpit.spawn(['sudo', '-n', 'chpasswd'],
-                    { err: 'message', environ: userEnv() });
-                proc.input('core:' + nw);
-                return proc;
-            }
-        }
-    ],
+    addStep: function(step) { this.steps.push(step); },
 
     show: function() {
         this.currentStep = 0;
         this._renderStep();
-        $('first-login-dialog').showModal();
+        this.dialog.showModal();
     },
 
     _renderStep: function() {
@@ -2348,32 +2293,30 @@ const FirstLoginWizard = {
     },
 
     _completeWizard: function() {
-        var dlg = $('first-login-dialog');
-        var proc = cockpit.spawn(
-            ['bash', '-c', 'sudo -n mkdir -p /var/lib/inferno && sudo -n touch ' + this.sentinel],
-            { err: 'message', environ: userEnv() }
-        );
-        proc.then(function() {
-            dlg.close();
+        var self = this;
+        spSudo('mkdir -p /var/lib/inferno && sudo -n touch ' + self.sentinel)
+        .then(function() {
+            self.dialog.close();
             toast('Password changed — setup complete.', 'success', 4000);
         }).catch(function(err) {
             // Sentinel write failed — still close (non-fatal)
-            dlg.close();
+            self.dialog.close();
             toast('Password changed. (Note: could not write sentinel: ' + String(err) + ')', 'warning', 6000);
         });
     },
 
     init: function() {
         var self = this;
+        self.dialog = $('first-login-dialog');
 
         // Sentinel check — show wizard only if sentinel absent
-        sp(['test', '-f', self.sentinel])
-            .then(function() { /* sentinel exists — wizard already done */ })
-            .catch(function() { self.show(); });
+        cockpit.file(self.sentinel).read().then(function(content) {
+            if (content === null) self.show();
+        });
 
         // "Remind me later" — close without writing sentinel
         $('flw-btn-skip').addEventListener('click', function() {
-            $('first-login-dialog').close();
+            self.dialog.close();
         });
 
         // Back button
@@ -2416,6 +2359,65 @@ const FirstLoginWizard = {
         });
     }
 };
+
+// Register built-in wizard steps.
+// Future steps can be added the same way anywhere below this point.
+FirstLoginWizard.addStep({
+    id: 'change-password',
+    title: 'Change Default Password',
+    description: 'For security, please change the default password for the core account before continuing.',
+    render: function(el) {
+        var frag = document.createDocumentFragment();
+
+        var title = document.createElement('div');
+        title.className = 'flw-step-title';
+        title.textContent = this.title;
+        frag.appendChild(title);
+
+        var desc = document.createElement('div');
+        desc.className = 'flw-step-desc';
+        desc.textContent = this.description;
+        frag.appendChild(desc);
+
+        ['flw-current-pass', 'flw-new-pass', 'flw-confirm-pass'].forEach(function(id, i) {
+            var labels = ['Current password', 'New password', 'Confirm new password'];
+            var field = document.createElement('div');
+            field.className = 'flw-field';
+            var lbl = document.createElement('label');
+            lbl.setAttribute('for', id);
+            lbl.textContent = labels[i];
+            var inp = document.createElement('input');
+            inp.type = 'password';
+            inp.id = id;
+            inp.autocomplete = (i === 0) ? 'current-password' : 'new-password';
+            field.appendChild(lbl);
+            field.appendChild(inp);
+            frag.appendChild(field);
+        });
+
+        var errDiv = document.createElement('div');
+        errDiv.className = 'flw-error';
+        errDiv.id = 'flw-error-msg';
+        frag.appendChild(errDiv);
+
+        el.appendChild(frag);
+    },
+    validate: function() {
+        var cur  = ($('flw-current-pass')  || {}).value || '';
+        var nw   = ($('flw-new-pass')       || {}).value || '';
+        var conf = ($('flw-confirm-pass')   || {}).value || '';
+        if (!cur)           return 'Please enter your current password.';
+        if (nw.length < 8)  return 'New password must be at least 8 characters.';
+        if (nw !== conf)    return 'New passwords do not match.';
+        if (nw === cur)     return 'New password must differ from the current password.';
+        return null;
+    },
+    onComplete: function() {
+        var nw = ($('flw-new-pass') || {}).value || '';
+        return cockpit.spawn(['chpasswd'], { superuser: 'require', err: 'message' })
+            .input('core:' + nw);
+    }
+});
 
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function refreshAll() {
