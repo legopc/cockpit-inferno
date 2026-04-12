@@ -46,7 +46,8 @@ let USER_HOME   = "/var/home/core";
 let _refreshTimer  = null;   // auto-refresh interval handle
 let _followTimer   = null;   // journal follow interval handle
 let _ptpTimer      = null;   // PTP live-graph polling interval handle
-let _ptpHistory    = [];     // rolling offset history for sparkline (max 30 pts)
+let _ptpHistory    = [];     // rolling offset history for live graph (max 60 pts ~5min)
+let _ptpTimes      = [];     // timestamps (ms) matching _ptpHistory entries
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -1294,6 +1295,120 @@ async function loadAloop() {
     }
 }
 
+// ── PTP Live SVG Graph ─────────────────────────────────────────────────────
+function renderPtpLiveSVG() {
+    var wrap = $("ptp-svg-wrap");
+    if (!wrap) return;
+
+    var vals  = _ptpHistory;
+    var times = _ptpTimes;
+    var n     = vals.length;
+
+    if (!n) { wrap.innerHTML = ""; return; }
+
+    // Layout constants (viewBox 600×130)
+    var VW = 600, VH = 130;
+    var padTop = 10, padRight = 10, padBottom = 24, padLeft = 58;
+    var plotW = VW - padLeft - padRight;
+    var plotH = VH - padTop - padBottom;
+
+    var maxAbs = Math.max.apply(null, vals.map(Math.abs));
+    if (!maxAbs) maxAbs = 1;
+
+    var fmt = function(ns) {
+        var a = Math.abs(ns);
+        if (a === 0) return "0";
+        if (a < 1e3)  return (ns > 0 ? "+" : "") + Math.round(ns) + "ns";
+        if (a < 1e6)  return (ns > 0 ? "+" : "") + (ns / 1e3).toFixed(1) + "\u00b5s";
+        return (ns > 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
+    };
+
+    var SVG = "http://www.w3.org/2000/svg";
+
+    function el(tag, attrs) {
+        var e = document.createElementNS(SVG, tag);
+        Object.keys(attrs).forEach(function(k) { e.setAttribute(k, attrs[k]); });
+        return e;
+    }
+
+    var svg = el("svg", {
+        viewBox: "0 0 " + VW + " " + VH,
+        style: "width:100%;display:block",
+        "aria-hidden": "true"
+    });
+
+    // Y-axis gridlines + labels at fracs [1, 0.5, 0, -0.5, -1]
+    [1, 0.5, 0, -0.5, -1].forEach(function(frac) {
+        // plotH centre maps to y=0 offset
+        var y = padTop + plotH / 2 - frac * plotH * 0.44;
+        var isZero = (frac === 0);
+
+        // gridline across full plot width
+        svg.appendChild(el("line", {
+            x1: padLeft, y1: y, x2: padLeft + plotW, y2: y,
+            stroke: isZero ? "rgba(0,0,0,0.18)" : "rgba(0,0,0,0.07)",
+            "stroke-width": isZero ? 1 : 0.5,
+            "stroke-dasharray": isZero ? "" : "3 3"
+        }));
+
+        // Y-axis label
+        var t = el("text", {
+            x: padLeft - 4, y: y,
+            "text-anchor": "end",
+            "dominant-baseline": "middle",
+            style: "font-size:9px;font-family:monospace;fill:#6a6e73"
+        });
+        t.textContent = fmt(frac * maxAbs);
+        svg.appendChild(t);
+    });
+
+    // X-axis labels: 5 evenly-spaced time ticks
+    var nowMs    = times[times.length - 1] || Date.now();
+    var startMs  = times[0] || (nowMs - (n - 1) * 5000);
+    var spanMs   = nowMs - startMs || 1;
+    var xTicks   = [0, 0.25, 0.5, 0.75, 1];
+    var xLabelY  = VH - 4;
+
+    xTicks.forEach(function(f) {
+        var x  = padLeft + f * plotW;
+        var ms = startMs + f * spanMs;
+        var ageSec = Math.round((nowMs - ms) / 1000);
+        var lbl = ageSec === 0 ? "now" : ageSec < 60 ? ageSec + "s ago" : Math.round(ageSec / 60) + "m ago";
+
+        svg.appendChild(el("line", {
+            x1: x, y1: padTop + plotH, x2: x, y2: padTop + plotH + 3,
+            stroke: "#8a8d90", "stroke-width": 0.5
+        }));
+        svg.appendChild(Object.assign(el("text", {
+            x: x, y: xLabelY,
+            "text-anchor": f === 0 ? "start" : f === 1 ? "end" : "middle",
+            style: "font-size:9px;font-family:monospace;fill:#8a8d90"
+        }), { textContent: lbl }));
+    });
+
+    // Data polyline
+    var pts = vals.map(function(v, i) {
+        var tMs   = times[i] || (startMs + i * 5000);
+        var xFrac = spanMs ? (tMs - startMs) / spanMs : i / (n - 1 || 1);
+        var x = padLeft + xFrac * plotW;
+        var y = padTop + plotH / 2 - (v / maxAbs) * plotH * 0.44;
+        return x.toFixed(1) + "," + y.toFixed(1);
+    }).join(" ");
+
+    svg.appendChild(el("polyline", {
+        points: pts,
+        fill: "none",
+        stroke: "#e05810",
+        "stroke-width": 1.5,
+        "stroke-linejoin": "round",
+        "stroke-linecap": "round"
+    }));
+
+    // Clear and inject
+    wrap.innerHTML = "";
+    wrap.appendChild(svg);
+}
+
 // ── PTP status card ────────────────────────────────────────────────────────
 async function refreshPTP() {
     var badge   = $("ptp-state-badge"); // may be null — element removed from Services tab
@@ -1340,7 +1455,16 @@ async function refreshPTP() {
         });
         allOffsets.reverse();
         if (allOffsets.length) {
-            _ptpHistory = _ptpHistory.concat(allOffsets).slice(-30);
+            const now = Date.now();
+            const newTimes = allOffsets.map((_, i) => now - (allOffsets.length - 1 - i) * 5000);
+            _ptpHistory = _ptpHistory.concat(allOffsets).slice(-60);
+            _ptpTimes   = _ptpTimes.concat(newTimes).slice(-60);
+        }
+
+        // Render live SVG graph + live stats
+        renderPtpLiveSVG();
+        if (typeof DiagnosticsTab !== "undefined" && DiagnosticsTab.renderPtpStats) {
+            DiagnosticsTab.renderPtpStats();
         }
 
         // Stability fallback: if no Recommended state line in window, infer from offsets
@@ -2094,177 +2218,36 @@ function togglePeakMonitor() {
 
 // ── Diagnostics Tab ────────────────────────────────────────────────────────────
 const DiagnosticsTab = {
-    ptpData: [],
-    ptpJson: null,
-
     init() {
-        $("diag-ptp-collect-btn").addEventListener("click", () => this.collectPtp());
-        $("diag-ptp-export-btn").addEventListener("click", () => this.exportPtpCsv());
         $("diag-alsa-refresh-btn").addEventListener("click", () => this.refreshAlsa());
         $("diag-bench-run-btn").addEventListener("click", () => this.runBench());
+        this.renderPtpStats();
     },
 
-    collectPtp() {
-        const btn = $("diag-ptp-collect-btn");
-        const status = $("diag-ptp-status");
-        btn.disabled = true;
-        btn.textContent = "Collecting…";
-        status.style.display = "block";
-        status.textContent = "Collecting PTP samples (up to 5 min)…";
-
-        const benchPath = "/usr/local/sbin/inferno-bench/ptp-bench.sh";
-        const proc = cockpit.spawn(
-            [benchPath, "--minutes", "5", "--output", "/tmp/inferno-ptp-diag.json"],
-            { superuser: "try", err: "message" }
-        );
-
-        proc.stream(data => {
-            status.textContent = data.trim().split("\n").pop() || "Collecting…";
-        });
-
-        proc.then(() => {
-            cockpit.file("/tmp/inferno-ptp-diag.json").read()
-                .then(content => {
-                    if (!content) return;
-                    const result = JSON.parse(content);
-                    this.ptpJson = content;
-                    this.ptpData = result.samples || [];
-                    this.renderSparkline();
-                    this.renderPtpStats(result);
-                    $("diag-ptp-export-btn").disabled = false;
-                    status.textContent = "✓ Collected " + this.ptpData.length + " samples";
-                    btn.disabled = false;
-                    btn.textContent = "Collect 5 min";
-                })
-                .catch(err => {
-                    status.textContent = "Error reading results: " + err.message;
-                    btn.disabled = false;
-                    btn.textContent = "Collect 5 min";
-                });
-        }).catch(err => {
-            status.textContent = "Error: " + (err.message || err);
-            btn.disabled = false;
-            btn.textContent = "Collect 5 min";
-        });
-    },
-
-    renderSparkline() {
-        const canvas = $("diag-ptp-sparkline");
-        if (!canvas) return;
-
-        const wrap = $("ptp-graph-wrap");
-        const ctx = canvas.getContext("2d");
-        const W = canvas.width, H = canvas.height;
-        ctx.clearRect(0, 0, W, H);
-
-        // Remove any previously injected axis elements
-        const removeAxes = () => {
-            ["ptp-y-axis", "ptp-x-axis"].forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.remove();
-            });
-        };
-
-        if (!this.ptpData.length) { removeAxes(); return; }
-
-        const vals = this.ptpData.map(s => typeof s === "number" ? s : (s.offsetNs || s.offset || 0));
-        const n = vals.length;
-        const maxAbs = Math.max(...vals.map(Math.abs), 1);
-
-        const fmt = ns => {
-            const a = Math.abs(ns);
-            if (a === 0) return "0";
-            if (a < 1e3) return (ns > 0 ? "+" : "") + Math.round(ns) + "ns";
-            if (a < 1e6) return (ns > 0 ? "+" : "") + (ns / 1e3).toFixed(1) + "µs";
-            return (ns > 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
-        };
-
-        removeAxes();
-
-        // Y-axis: absolutely-positioned labels aligned to gridline percentages
-        if (wrap) {
-            const yDiv = document.createElement("div");
-            yDiv.id = "ptp-y-axis";
-            yDiv.style.cssText = "position:relative;min-width:52px;flex-shrink:0;align-self:stretch";
-            [{v: maxAbs, pct: 6}, {v: maxAbs/2, pct: 28}, {v: 0, pct: 50},
-             {v: -maxAbs/2, pct: 72}, {v: -maxAbs, pct: 94}].forEach(({v, pct}) => {
-                const span = document.createElement("span");
-                span.style.cssText = `position:absolute;right:4px;top:${pct}%;transform:translateY(-50%);font-size:10px;font-family:monospace;color:#6a6e73;white-space:nowrap`;
-                span.textContent = fmt(v);
-                yDiv.appendChild(span);
-            });
-            wrap.insertBefore(yDiv, wrap.firstChild);
-
-            // X-axis: inserted inside canvas-wrapper so it naturally matches canvas width
-            const canvasWrapper = canvas.parentElement;
-            const totalSec = n;
-            const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
-            const labels = [];
-            for (let t = 0; t <= totalSec; t += tickSec)
-                labels.push(t === 0 ? "0s" : t < 60 ? t + "s" : (t/60).toFixed(0) + "m");
-            const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec/60).toFixed(1) + "m";
-            if (labels[labels.length-1] !== endLbl) labels.push(endLbl);
-            const xDiv = document.createElement("div");
-            xDiv.id = "ptp-x-axis";
-            xDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;font-family:monospace;color:#8a8d90;margin-top:2px";
-            xDiv.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
-            canvasWrapper.appendChild(xDiv);
-        }
-
-        // Canvas: gridlines + line
-        const mid = H / 2;
-        [1, 0.5, 0, -0.5, -1].forEach(frac => {
-            const y = mid - frac * (mid * 0.88);
-            ctx.strokeStyle = frac === 0 ? "rgba(0,0,0,0.15)" : "rgba(0,0,0,0.05)";
-            ctx.lineWidth = frac === 0 ? 1 : 0.5;
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-        });
-
-        ctx.strokeStyle = "#e05810";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        vals.forEach((v, i) => {
-            const x = n > 1 ? (i / (n - 1)) * W : 0;
-            const y = mid - (v / maxAbs) * (mid * 0.88);
-            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-    },
-
-    renderPtpStats(result) {
+    renderPtpStats() {
         const el = $("diag-ptp-stats");
+        if (!el) return;
         const fmt = ns => {
             const a = Math.abs(ns);
             if (a < 1e3)  return ns.toFixed(0) + " ns";
-            if (a < 1e6) return (ns / 1e3).toFixed(2) + " µs";
+            if (a < 1e6)  return (ns / 1e3).toFixed(2) + " µs";
             return (ns / 1e6).toFixed(2) + " ms";
         };
-        const grade = (result.metadata && result.metadata.grade) || "";
-        const gradeClass = grade.includes("HW") ? "badge-green" : (grade.includes("RT") ? "badge-yellow" : "badge-red");
-        const stats = result.stats || {};
-        const meta = result.metadata || {};
+        const vals = _ptpHistory;
+        if (!vals.length) {
+            el.innerHTML = '<span class="loading-text">Waiting for PTP data\u2026</span>';
+            return;
+        }
+        const cur  = vals[vals.length - 1];
+        const min  = Math.min.apply(null, vals);
+        const max  = Math.max.apply(null, vals);
+        const avg  = vals.reduce((s, v) => s + v, 0) / vals.length;
         el.innerHTML =
-            '<div class="stat-badge ' + gradeClass + '">' + grade + "</div>" +
-            '<div class="stat-item"><span>Mean</span><strong>' + fmt(stats.mean || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>p95</span><strong>' + fmt(stats.p95 || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>p99</span><strong>' + fmt(stats.p99 || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>Abs Max</span><strong>' + fmt(stats.abs_max || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>Std Dev</span><strong>' + fmt(stats.stddev || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>Samples</span><strong>' + (meta.sample_count || 0) + "</strong></div>";
-    },
-
-    exportPtpCsv() {
-        if (!this.ptpData.length) return;
-        const lines = ["index,offset_ns"];
-        this.ptpData.forEach((v, i) => {
-            const ns = typeof v === "number" ? v : (v.offsetNs || v.offset || 0);
-            lines.push(i + "," + ns);
-        });
-        const blob = new Blob([lines.join("\n")], { type: "text/csv" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = "inferno-ptp.csv"; a.click();
-        URL.revokeObjectURL(url);
+            '<div class="stat-item"><span>Current</span><strong>' + fmt(cur) + '</strong></div>' +
+            '<div class="stat-item"><span>Min</span><strong>' + fmt(min) + '</strong></div>' +
+            '<div class="stat-item"><span>Max</span><strong>' + fmt(max) + '</strong></div>' +
+            '<div class="stat-item"><span>Avg</span><strong>' + fmt(avg) + '</strong></div>' +
+            '<div class="stat-item"><span>Samples</span><strong>' + vals.length + '</strong></div>';
     },
 
     refreshAlsa() {

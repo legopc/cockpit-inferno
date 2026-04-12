@@ -402,19 +402,10 @@
       <div class="card" id="diag-ptp-card">
         <div class="card-header">
           <span class="card-title">PTP Performance</span>
-          <div class="btn-group">
-            <button class="btn btn-primary btn-sm" id="diag-ptp-collect-btn">Collect 5 min</button>
-            <button class="btn btn-secondary btn-sm" id="diag-ptp-export-btn" disabled>Export CSV</button>
-          </div>
         </div>
         <div class="card-body">
-          <div id="ptp-live-strip" class="ptp-content-grid" style="margin-bottom:0.5rem"></div>
-          <div id="diag-ptp-status" class="loading-text" style="display:none"></div>
-          <div id="ptp-graph-wrap" style="display:flex;gap:6px;align-items:stretch;margin-bottom:4px">
-            <div style="flex:1">
-              <canvas id="diag-ptp-sparkline" width="600" height="100" style="width:100%;display:block"></canvas>
-            </div>
-          </div>
+          <div id="ptp-live-strip" class="ptp-content-grid" style="margin-bottom:0.75rem"></div>
+          <div id="ptp-svg-wrap" style="margin-bottom:0.5rem"></div>
           <div id="diag-ptp-stats" class="diag-stats-grid"></div>
         </div>
       </div>
