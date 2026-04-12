@@ -2137,15 +2137,13 @@ const DiagnosticsTab = {
 
     renderSparkline() {
         const canvas = $("diag-ptp-sparkline");
-        const yAxis  = $("ptp-y-axis");
-        const xAxis  = $("ptp-x-axis");
         if (!canvas) return;
 
         const ctx = canvas.getContext("2d");
         const W = canvas.width, H = canvas.height;
         ctx.clearRect(0, 0, W, H);
 
-        if (!this.ptpData.length) { if (yAxis) yAxis.innerHTML = ""; if (xAxis) xAxis.innerHTML = ""; return; }
+        if (!this.ptpData.length) return;
 
         const vals = this.ptpData.map(s => typeof s === "number" ? s : (s.offsetNs || s.offset || 0));
         const n = vals.length;
@@ -2159,41 +2157,51 @@ const DiagnosticsTab = {
             return (ns > 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
         };
 
-        // HTML Y-axis labels (top → bottom: +max, +half, 0, -half, -max)
-        if (yAxis) yAxis.innerHTML = [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs]
-            .map(v => `<span>${fmt(v)}</span>`).join("");
+        // Layout: left margin for Y labels, bottom margin for X labels
+        const ml = 56, mb = 18, mt = 6, mr = 6;
+        const pw = W - ml - mr, ph = H - mt - mb;
 
-        // HTML X-axis labels
-        if (xAxis) {
-            const totalSec = n;
-            const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
-            let labels = [];
-            for (let t = 0; t <= totalSec; t += tickSec)
-                labels.push(t === 0 ? "0s" : t < 60 ? t + "s" : (t/60).toFixed(0) + "m");
-            // Replace last with actual end time
-            const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec/60).toFixed(1) + "m";
-            if (labels[labels.length-1] !== endLbl) labels.push(endLbl);
-            xAxis.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
-        }
+        const px = i => ml + (n > 1 ? (i / (n - 1)) * pw : 0);
+        const py = v => mt + ph / 2 - (v / maxAbs) * (ph / 2 * 0.88);
 
-        // Draw gridlines on canvas (no text needed)
-        [1, 0.5, 0, -0.5, -1].forEach(frac => {
-            const y = H/2 - frac * (H/2 * 0.9);
-            ctx.strokeStyle = frac === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
-            ctx.lineWidth = frac === 0 ? 1 : 0.5;
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        // Gridlines
+        ctx.font = "10px monospace";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs].forEach(v => {
+            const y = py(v);
+            ctx.strokeStyle = v === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
+            ctx.lineWidth = v === 0 ? 1 : 0.5;
+            ctx.beginPath(); ctx.moveTo(ml, y); ctx.lineTo(W - mr, y); ctx.stroke();
+            ctx.fillStyle = "rgba(255,255,255,0.6)";
+            ctx.fillText(fmt(v), ml - 4, y);
         });
 
-        // Draw line
+        // X-axis labels
+        const totalSec = n;
+        const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
+        ctx.textBaseline = "top";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "rgba(255,255,255,0.45)";
+        for (let t = 0; t <= totalSec; t += tickSec) {
+            const lbl = t === 0 ? "0s" : t < 60 ? t + "s" : (t / 60).toFixed(0) + "m";
+            const x = n > 1 ? ml + (t / (n - 1)) * pw : ml;
+            ctx.fillText(lbl, x, H - mb + 3);
+        }
+        const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec / 60).toFixed(1) + "m";
+        ctx.fillText(endLbl, ml + pw, H - mb + 3);
+
+        // Line
         ctx.strokeStyle = "#e05810";
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        vals.forEach((v, i) => {
-            const x = n > 1 ? (i / (n - 1)) * W : 0;
-            const y = H/2 - (v / maxAbs) * (H/2 * 0.9);
-            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-        });
+        vals.forEach((v, i) => { i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)); });
         ctx.stroke();
+
+        // Zero line (on top of gridlines, under data)
+        ctx.strokeStyle = "rgba(255,255,255,0.15)";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(ml, py(0)); ctx.lineTo(W - mr, py(0)); ctx.stroke();
     },
 
     renderPtpStats(result) {
