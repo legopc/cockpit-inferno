@@ -1457,8 +1457,12 @@ async function runHealthCheck() {
     }, "loadAloop()");
 
     await check("PTP clock locked", async function() {
-        var o = await spSudo("journalctl -u statime-inferno -n 40 --no-pager -o cat | grep -i locked | tail -1");
-        return o.trim() ? { status: "pass", detail: "locked" } : { status: "warn", detail: "not yet locked (may be syncing)" };
+        var o = await spSudo("journalctl -u statime-inferno --since=-60s --no-pager -o cat | grep 'Recommended state port' | tail -1");
+        if (/Some\([SM][1-3]\(/.test(o)) return { status: "pass", detail: "locked" };
+        var off = await spSudo("journalctl -u statime-inferno --since=-10s --no-pager -o cat | grep 'Estimated offset' | tail -5");
+        var vals = [...off.matchAll(/Estimated offset ([+-]?[0-9.]+)ns/g)].map(function(m){ return Math.abs(parseFloat(m[1])); });
+        if (vals.length >= 3 && vals.every(function(v){ return v < 1e6; })) return { status: "pass", detail: "locked (offset stable)" };
+        return { status: "warn", detail: "not yet locked (may be syncing)" };
     }, null);
 
     await check("inferno-bridge active", async function() {
