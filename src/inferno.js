@@ -1527,7 +1527,7 @@ async function scanDanteDevices() {
         // timeout(8) kills it after 8 s; -r resolves IPs; -p gives parsable output.
         // Parsable "=" resolved line format:
         //   = ; iface ; proto ; name ; type ; domain ; host ; addr-type ; addr(IP) ; port ; txt
-        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._tcp"],
+        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._udp"],
                                       { err: "ignore" });
         var lines = (raw || "").split("\n").filter(function(l){ return l.startsWith("="); });
         var seen = {};
@@ -1537,8 +1537,8 @@ async function scanDanteDevices() {
             if (parts.length < 9) return;
             var name = parts[3] || "?";
             var host = parts[6] || "";
-            var ip   = parts[8] || "";    // parts[8] is the resolved IP (parts[7] is addr-type)
-            var port = parts[9] || "";
+            var ip   = parts[7] || "";    // resolved IP
+            var port = parts[8] || "";    // port
             if (seen[name]) return;
             seen[name] = true;
             // skip IPv6 duplicates — prefer IPv4 entries
