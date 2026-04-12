@@ -1296,6 +1296,40 @@ async function loadAloop() {
 }
 
 // ── PTP Live SVG Graph ─────────────────────────────────────────────────────
+// Bulk-load last 15 min of PTP history from journal on first load
+async function preloadPtpHistory() {
+    try {
+        var raw = await spSudo(
+            "journalctl -u statime-inferno --since=-15min --no-pager -o short-iso | grep 'Estimated offset'"
+        );
+        if (!raw) return;
+        var entries = [];
+        raw.split("\n").forEach(function(line) {
+            // short-iso: "2026-04-12T20:30:01+0000 host statime-inferno[x]: Estimated offset 123.4ns"
+            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-]\d{4})\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
+            if (m) entries.push({ t: new Date(m[1]).getTime(), v: parseFloat(m[2]) });
+        });
+        if (!entries.length) return;
+
+        // Downsample: keep at most 1 sample per 5s bucket to match live refresh rate
+        var buckets = {};
+        entries.forEach(function(e) {
+            var bucket = Math.floor(e.t / 5000);
+            buckets[bucket] = e; // last entry in each bucket wins
+        });
+        var sampled = Object.keys(buckets).sort(function(a,b){return a-b;})
+            .map(function(k){ return buckets[k]; })
+            .slice(-180);
+
+        _ptpHistory = sampled.map(function(e){ return e.v; });
+        _ptpTimes   = sampled.map(function(e){ return e.t; });
+
+        renderPtpLiveSVG();
+        if (typeof DiagnosticsTab !== "undefined" && DiagnosticsTab.renderPtpStats) {
+            DiagnosticsTab.renderPtpStats();
+        }
+    } catch(e) { /* silent — live data will fill in */ }
+}
 function renderPtpLiveSVG() {
     var wrap = $("ptp-svg-wrap");
     if (!wrap) return;
@@ -1417,7 +1451,7 @@ async function refreshPTP() {
 
     try {
         var raw = await spSudo(
-            "journalctl -u statime-inferno --since=-60s --no-pager -o cat | grep -E 'Estimated offset|Recommended state port'"
+            "journalctl -u statime-inferno --since=-15s --no-pager -o short-iso"
         );
         var lines = (raw || "").split("\n").filter(Boolean).reverse();
 
@@ -1429,37 +1463,39 @@ async function refreshPTP() {
 
         for (var i = 0; i < lines.length; i++) {
             var l = lines[i];
-            // State: "Recommended state port N: Some(S1(/M1/M2/M3(..." = synced/locked
             if (state === "unknown" && /Recommended state port/.test(l)) {
                 if (/Some\([SM][1-3]\(/.test(l)) state = "locked";
                 else if (/None/.test(l))          state = "acquiring";
             }
-            // Grandmaster UUID from clock_uuid bytes: [16, 231, 198, 17, 15, 4] → 10:e7:c6:11:0f:04
             if (!grandmaster) {
                 var gm = l.match(/clock_uuid: \[(\d+), (\d+), (\d+), (\d+), (\d+), (\d+)\]/);
                 if (gm) grandmaster = [gm[1],gm[2],gm[3],gm[4],gm[5],gm[6]]
                     .map(function(b){ return ('0'+parseInt(b).toString(16)).slice(-2); }).join(':');
             }
-            // Most recent offset value
             if (offsetNs === null) {
                 var off = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
                 if (off) { offsetNs = parseFloat(off[1]); offsetStr = Math.round(offsetNs) + " ns"; }
             }
         }
 
-        // Collect all recent offsets for stability check only
-        var allOffsets = [];
-        lines.forEach(function(l) {
-            var m = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
-            if (m) allOffsets.push(parseFloat(m[1]));
+        // Parse all timestamped offset lines; add only those newer than last known sample
+        var lastKnownTs = _ptpTimes.length ? _ptpTimes[_ptpTimes.length - 1] : 0;
+        var newEntries = [];
+        lines.forEach(function(line) {
+            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-]\d{4})\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
+            if (m) {
+                var t = new Date(m[1]).getTime();
+                if (t > lastKnownTs) newEntries.push({ t: t, v: parseFloat(m[2]) });
+            }
         });
-        allOffsets.reverse();
-
-        // Add exactly ONE sample per 5s refresh tick (the most recent offset)
-        if (offsetNs !== null) {
-            _ptpHistory = _ptpHistory.concat([offsetNs]).slice(-180);
-            _ptpTimes   = _ptpTimes.concat([Date.now()]).slice(-180);
+        newEntries.sort(function(a,b){ return a.t - b.t; });
+        if (newEntries.length) {
+            _ptpHistory = _ptpHistory.concat(newEntries.map(function(e){ return e.v; })).slice(-180);
+            _ptpTimes   = _ptpTimes.concat(newEntries.map(function(e){ return e.t; })).slice(-180);
         }
+
+        // Stability fallback data
+        var allOffsets = newEntries.map(function(e){ return e.v; });
 
         // Render live SVG graph + live stats
         renderPtpLiveSVG();
