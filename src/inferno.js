@@ -1523,12 +1523,9 @@ async function scanDanteDevices() {
     btn.disabled = true; btn.textContent = "\u23F3 Scanning\u2026 (8s)";
     content.innerHTML = '<span class="loading-text">Scanning for Dante devices via mDNS — please wait\u2026</span>';
     try {
-        // Run avahi-browse without -t so it browses for the full timeout period.
-        // timeout(8) kills it after 8 s; -r resolves IPs; -p gives parsable output.
-        // Parsable "=" resolved line format:
-        //   = ; iface ; proto ; name ; type ; domain ; host ; addr-type ; addr(IP) ; port ; txt
-        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._udp"],
-                                      { err: "ignore" });
+        // avahi-browse exits non-zero when killed by timeout — use bash wrapper with "; true"
+        // to always exit 0 so cockpit.spawn doesn't reject and discard the output.
+        var raw = await spUser("timeout 8 avahi-browse -rp _netaudio-arc._udp 2>/dev/null; true");
         var lines = (raw || "").split("\n").filter(function(l){ return l.startsWith("="); });
         var seen = {};
         var devices = [];
@@ -2154,25 +2151,69 @@ const DiagnosticsTab = {
 
         if (!this.ptpData.length) return;
 
-        const vals = this.ptpData.map(s => {
-            return typeof s === "number" ? s : (s.offsetNs || s.offset || 0);
-        });
+        const vals = this.ptpData.map(s => typeof s === "number" ? s : (s.offsetNs || s.offset || 0));
+        const n = vals.length;
         const maxAbs = Math.max(...vals.map(Math.abs), 1);
-        const mid = H / 2;
 
+        // Axis margins
+        const ML = 46, MR = 6, MT = 8, MB = 18;
+        const pw = W - ML - MR;
+        const ph = H - MT - MB;
+        const midY = MT + ph / 2;
+
+        // Format for axis tick labels
+        const fmtAxis = ns => {
+            const a = Math.abs(ns);
+            if (a === 0) return "0";
+            if (a < 1e3) return ns.toFixed(0) + "ns";
+            if (a < 1e6) return (ns / 1e3).toFixed(1) + "µs";
+            return (ns / 1e6).toFixed(2) + "ms";
+        };
+
+        ctx.font = "9px monospace";
+
+        // Y gridlines + labels: +max, +half, 0, -half, -max
+        [maxAbs, maxAbs / 2, 0, -maxAbs / 2, -maxAbs].forEach(v => {
+            const y = midY - (v / maxAbs) * (ph / 2 * 0.9);
+            ctx.strokeStyle = v === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
+            ctx.lineWidth = v === 0 ? 1 : 0.5;
+            ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(W - MR, y); ctx.stroke();
+            ctx.fillStyle = "rgba(255,255,255,0.45)";
+            ctx.textAlign = "right";
+            ctx.fillText(fmtAxis(v), ML - 3, y + 3);
+        });
+
+        // X-axis time labels — ~1 sample/second from statime journal
+        const totalSec = n;
+        const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
+        ctx.textAlign = "center";
+        for (let t = 0; t <= totalSec; t += tickSec) {
+            const x = ML + (totalSec > 0 ? t / totalSec : 0) * pw;
+            const lbl = t === 0 ? "0s" : t < 60 ? t + "s" : (t / 60).toFixed(0) + "m";
+            ctx.fillText(lbl, x, H - 3);
+            ctx.strokeStyle = "rgba(255,255,255,0.1)";
+            ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(x, H - MB + 1); ctx.lineTo(x, H - MB + 4); ctx.stroke();
+        }
+        // End label
+        if (totalSec > 0) {
+            const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec / 60).toFixed(1) + "m";
+            ctx.fillStyle = "rgba(255,255,255,0.35)";
+            ctx.textAlign = "right";
+            ctx.fillText(endLbl, W - MR, H - 3);
+        }
+
+        // Draw line
         ctx.strokeStyle = "#e05810";
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         vals.forEach((v, i) => {
-            const x = (i / (vals.length - 1)) * W;
-            const y = mid - (v / maxAbs) * (mid * 0.85);
+            const x = ML + (n > 1 ? i / (n - 1) : 0) * pw;
+            const y = midY - (v / maxAbs) * (ph / 2 * 0.9);
             i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
         });
         ctx.stroke();
-
-        ctx.strokeStyle = "rgba(255,255,255,0.15)";
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
     },
 
     renderPtpStats(result) {
