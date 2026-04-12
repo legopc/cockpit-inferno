@@ -1375,31 +1375,74 @@ async function refreshPTP() {
 }
 
 function drawSparkline(pts) {
-    var svg = $("ptp-sparkline");
-    if (!svg || pts.length < 2) return;
-    svg.innerHTML = "";
-    var W = 300, H = 40, pad = 4;
+    var canvas = $("ptp-live-canvas");
+    var yAxis  = $("ptp-live-y-axis");
+    if (!canvas || pts.length < 2) return;
+
+    var W = canvas.width, H = canvas.height;
+    var pad = { top: 6, bottom: 6, left: 0, right: 6 };
+    var ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+
     var absMax = Math.max.apply(null, pts.map(Math.abs));
-    if (absMax === 0) absMax = 1;
-    function x(i) { return pad + (i / (pts.length - 1)) * (W - 2*pad); }
-    function y(v) { return pad + (1 - (v + absMax) / (2 * absMax)) * (H - 2*pad); }
-    var zero = y(0);
+    if (absMax < 10) absMax = 10;
+
+    var plotW = W - pad.left - pad.right;
+    var plotH = H - pad.top - pad.bottom;
+
+    function px(i)  { return pad.left + (i / (pts.length - 1)) * plotW; }
+    function py(v)  { return pad.top  + (1 - (v + absMax) / (2 * absMax)) * plotH; }
+
+    // Gridlines at +absMax/2, 0, -absMax/2
+    var gridLevels = [absMax, absMax / 2, 0, -absMax / 2, -absMax];
+    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    ctx.lineWidth = 1;
+    gridLevels.forEach(function(v) {
+        ctx.beginPath();
+        ctx.moveTo(pad.left, py(v));
+        ctx.lineTo(W - pad.right, py(v));
+        ctx.stroke();
+    });
 
     // Zero line
-    var zl = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    zl.setAttribute("x1", pad); zl.setAttribute("x2", W - pad);
-    zl.setAttribute("y1", zero); zl.setAttribute("y2", zero);
-    zl.setAttribute("class", "sparkline-zero"); svg.appendChild(zl);
+    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, py(0));
+    ctx.lineTo(W - pad.right, py(0));
+    ctx.stroke();
 
-    // Area
-    var apts = pts.map(function(v,i){ return x(i) + "," + y(v); });
-    var area = [x(0) + "," + zero].concat(apts).concat([x(pts.length-1) + "," + zero]).join(" ");
-    var polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-    polygon.setAttribute("points", area); polygon.setAttribute("class", "sparkline-area"); svg.appendChild(polygon);
+    // Fill area
+    ctx.beginPath();
+    ctx.moveTo(px(0), py(0));
+    pts.forEach(function(v, i) { ctx.lineTo(px(i), py(v)); });
+    ctx.lineTo(px(pts.length - 1), py(0));
+    ctx.closePath();
+    ctx.fillStyle = "rgba(100,180,255,0.18)";
+    ctx.fill();
 
     // Line
-    var polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    polyline.setAttribute("points", apts.join(" ")); polyline.setAttribute("class", "sparkline-line"); svg.appendChild(polyline);
+    ctx.beginPath();
+    pts.forEach(function(v, i) {
+        if (i === 0) ctx.moveTo(px(i), py(v));
+        else         ctx.lineTo(px(i), py(v));
+    });
+    ctx.strokeStyle = "rgba(100,200,255,0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Y-axis HTML labels
+    if (yAxis) {
+        yAxis.innerHTML = "";
+        var labelVals = [absMax, absMax / 2, 0, -absMax / 2, -absMax];
+        labelVals.forEach(function(v) {
+            var sp = document.createElement("span");
+            sp.textContent = (Math.round(v) >= 0 ? "+" : "") + Math.round(v) + " ns";
+            sp.style.lineHeight = "1";
+            sp.style.opacity = "0.7";
+            yAxis.appendChild(sp);
+        });
+    }
 }
 
 // ── Health check panel ─────────────────────────────────────────────────────
@@ -1436,6 +1479,7 @@ async function runHealthCheck() {
     results.innerHTML = "";
 
     var pass = 0, fail = 0, warn = 0;
+    var mode = currentMode || "spotify";
 
     async function check(name, fn, fixFn) {
         var placeholder = hcRow("", name, "running", "checking\u2026", null);
@@ -1455,6 +1499,12 @@ async function runHealthCheck() {
         else if (r.status === "warn") warn++;
     }
 
+    async function checkSvc(svc, isSystem) {
+        var cmd = isSystem ? sp(["systemctl", "is-active", svc]) : spUser("systemctl --user is-active " + svc);
+        var o = (await cmd).trim();
+        return o === "active" ? { status: "pass", detail: "active" } : { status: "fail", detail: o };
+    }
+
     await check("snd-aloop loaded", async function() {
         var o = await sp(["bash", "-c", "cat /proc/asound/cards | grep -i loopback | head -1"]);
         return o.trim() ? { status: "pass", detail: o.trim() } : { status: "fail", detail: "not in /proc/asound/cards" };
@@ -1469,22 +1519,38 @@ async function runHealthCheck() {
         return { status: "warn", detail: "not yet locked (may be syncing)" };
     }, null);
 
-    await check("inferno-bridge active", async function() {
-        var o = await spUser("systemctl --user is-active inferno-bridge");
-        var s = o.trim();
-        return s === "active" ? { status: "pass", detail: "active" } : { status: "fail", detail: s };
-    }, "svcAction('inferno-bridge','restart',false)");
-
-    await check("librespot active", async function() {
-        var o = await spUser("systemctl --user is-active librespot");
-        var s = o.trim();
-        return s === "active" ? { status: "pass", detail: "active" } : { status: "warn", detail: s + " (only needed in spotify mode)" };
-    }, "svcAction('librespot','restart',false)");
-
     await check("statime-inferno active", async function() {
-        var o = (await sp(["systemctl", "is-active", "statime-inferno"])).trim();
-        return o === "active" ? { status: "pass", detail: "active" } : { status: "fail", detail: o };
+        return checkSvc("statime-inferno", true);
     }, "svcAction('statime-inferno','restart',true)");
+
+    // Mode-specific service checks
+    if (mode === "spotify") {
+        await check("inferno-bridge active", async function() {
+            return checkSvc("inferno-bridge", false);
+        }, "svcAction('inferno-bridge','restart',false)");
+        await check("librespot active", async function() {
+            return checkSvc("librespot", false);
+        }, "svcAction('librespot','restart',false)");
+    } else if (mode === "iradio") {
+        await check("iradio-bridge active", async function() {
+            return checkSvc("iradio-bridge", false);
+        }, "svcAction('iradio-bridge','restart',false)");
+    } else if (mode === "aux-in" || mode === "aux") {
+        await check("inferno-aux-tx active", async function() {
+            return checkSvc("inferno-aux-tx", false);
+        }, "svcAction('inferno-aux-tx','restart',false)");
+    } else if (mode === "aux-out") {
+        await check("inferno-aux-rx active", async function() {
+            return checkSvc("inferno-aux-rx", false);
+        }, "svcAction('inferno-aux-rx','restart',false)");
+    } else if (mode === "aux-bidir") {
+        await check("inferno-aux-tx active", async function() {
+            return checkSvc("inferno-aux-tx", false);
+        }, "svcAction('inferno-aux-tx','restart',false)");
+        await check("inferno-aux-rx active", async function() {
+            return checkSvc("inferno-aux-rx", false);
+        }, "svcAction('inferno-aux-rx','restart',false)");
+    }
 
     await check("Disk < 80% used", async function() {
         var targets = ["/sysroot", "/var", "/"];
@@ -2145,72 +2211,60 @@ const DiagnosticsTab = {
 
     renderSparkline() {
         const canvas = $("diag-ptp-sparkline");
+        const yAxis  = $("ptp-y-axis");
+        const xAxis  = $("ptp-x-axis");
+        if (!canvas) return;
+
         const ctx = canvas.getContext("2d");
         const W = canvas.width, H = canvas.height;
         ctx.clearRect(0, 0, W, H);
 
-        if (!this.ptpData.length) return;
+        if (!this.ptpData.length) { if (yAxis) yAxis.innerHTML = ""; if (xAxis) xAxis.innerHTML = ""; return; }
 
         const vals = this.ptpData.map(s => typeof s === "number" ? s : (s.offsetNs || s.offset || 0));
         const n = vals.length;
         const maxAbs = Math.max(...vals.map(Math.abs), 1);
 
-        // Axis margins
-        const ML = 46, MR = 6, MT = 8, MB = 18;
-        const pw = W - ML - MR;
-        const ph = H - MT - MB;
-        const midY = MT + ph / 2;
-
-        // Format for axis tick labels
-        const fmtAxis = ns => {
+        const fmt = ns => {
             const a = Math.abs(ns);
             if (a === 0) return "0";
-            if (a < 1e3) return ns.toFixed(0) + "ns";
-            if (a < 1e6) return (ns / 1e3).toFixed(1) + "µs";
-            return (ns / 1e6).toFixed(2) + "ms";
+            if (a < 1e3) return (ns > 0 ? "+" : "") + Math.round(ns) + "ns";
+            if (a < 1e6) return (ns > 0 ? "+" : "") + (ns / 1e3).toFixed(1) + "µs";
+            return (ns > 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
         };
 
-        ctx.font = "9px monospace";
+        // HTML Y-axis labels (top → bottom: +max, +half, 0, -half, -max)
+        if (yAxis) yAxis.innerHTML = [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs]
+            .map(v => `<span>${fmt(v)}</span>`).join("");
 
-        // Y gridlines + labels: +max, +half, 0, -half, -max
-        [maxAbs, maxAbs / 2, 0, -maxAbs / 2, -maxAbs].forEach(v => {
-            const y = midY - (v / maxAbs) * (ph / 2 * 0.9);
-            ctx.strokeStyle = v === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
-            ctx.lineWidth = v === 0 ? 1 : 0.5;
-            ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(W - MR, y); ctx.stroke();
-            ctx.fillStyle = "rgba(255,255,255,0.45)";
-            ctx.textAlign = "right";
-            ctx.fillText(fmtAxis(v), ML - 3, y + 3);
+        // HTML X-axis labels
+        if (xAxis) {
+            const totalSec = n;
+            const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
+            let labels = [];
+            for (let t = 0; t <= totalSec; t += tickSec)
+                labels.push(t === 0 ? "0s" : t < 60 ? t + "s" : (t/60).toFixed(0) + "m");
+            // Replace last with actual end time
+            const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec/60).toFixed(1) + "m";
+            if (labels[labels.length-1] !== endLbl) labels.push(endLbl);
+            xAxis.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
+        }
+
+        // Draw gridlines on canvas (no text needed)
+        [1, 0.5, 0, -0.5, -1].forEach(frac => {
+            const y = H/2 - frac * (H/2 * 0.9);
+            ctx.strokeStyle = frac === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
+            ctx.lineWidth = frac === 0 ? 1 : 0.5;
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
         });
-
-        // X-axis time labels — ~1 sample/second from statime journal
-        const totalSec = n;
-        const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
-        ctx.fillStyle = "rgba(255,255,255,0.35)";
-        ctx.textAlign = "center";
-        for (let t = 0; t <= totalSec; t += tickSec) {
-            const x = ML + (totalSec > 0 ? t / totalSec : 0) * pw;
-            const lbl = t === 0 ? "0s" : t < 60 ? t + "s" : (t / 60).toFixed(0) + "m";
-            ctx.fillText(lbl, x, H - 3);
-            ctx.strokeStyle = "rgba(255,255,255,0.1)";
-            ctx.lineWidth = 0.5;
-            ctx.beginPath(); ctx.moveTo(x, H - MB + 1); ctx.lineTo(x, H - MB + 4); ctx.stroke();
-        }
-        // End label
-        if (totalSec > 0) {
-            const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec / 60).toFixed(1) + "m";
-            ctx.fillStyle = "rgba(255,255,255,0.35)";
-            ctx.textAlign = "right";
-            ctx.fillText(endLbl, W - MR, H - 3);
-        }
 
         // Draw line
         ctx.strokeStyle = "#e05810";
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         vals.forEach((v, i) => {
-            const x = ML + (n > 1 ? i / (n - 1) : 0) * pw;
-            const y = midY - (v / maxAbs) * (ph / 2 * 0.9);
+            const x = n > 1 ? (i / (n - 1)) * W : 0;
+            const y = H/2 - (v / maxAbs) * (H/2 * 0.9);
             i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
         });
         ctx.stroke();
