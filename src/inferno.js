@@ -1447,18 +1447,18 @@ async function refreshPTP() {
             }
         }
 
-        // Collect all recent offsets for sparkline
+        // Collect all recent offsets for stability check only
         var allOffsets = [];
         lines.forEach(function(l) {
             var m = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
             if (m) allOffsets.push(parseFloat(m[1]));
         });
         allOffsets.reverse();
-        if (allOffsets.length) {
-            const now = Date.now();
-            const newTimes = allOffsets.map((_, i) => now - (allOffsets.length - 1 - i) * 5000);
-            _ptpHistory = _ptpHistory.concat(allOffsets).slice(-180);
-            _ptpTimes   = _ptpTimes.concat(newTimes).slice(-180);
+
+        // Add exactly ONE sample per 5s refresh tick (the most recent offset)
+        if (offsetNs !== null) {
+            _ptpHistory = _ptpHistory.concat([offsetNs]).slice(-180);
+            _ptpTimes   = _ptpTimes.concat([Date.now()]).slice(-180);
         }
 
         // Render live SVG graph + live stats
