@@ -2458,7 +2458,8 @@ async function init() {
 
     // Start auto-refresh (default 20s)
     setRefreshInterval(20000);
-    // Initial PTP poll + start live timer if Services tab is active
+    // Pre-load 15min of PTP history from journal, then start live polling
+    preloadPtpHistory().catch(function(){});
     refreshPTP().catch(function(){});
     if (_activeTab === "tab-services") {
         if (_ptpTimer) clearInterval(_ptpTimer);
