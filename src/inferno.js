@@ -1284,8 +1284,8 @@ async function loadAloop() {
 // ── PTP status card ────────────────────────────────────────────────────────
 async function refreshPTP() {
     var badge   = $("ptp-state-badge");
-    var content = $("ptp-content");
-    content.innerHTML = "";
+    var strip   = $("ptp-live-strip");
+    if (strip) strip.innerHTML = "";
 
     try {
         var raw = await spSudo(
@@ -1347,16 +1347,18 @@ async function refreshPTP() {
             offsetClass = absOff < 1000 ? "good" : absOff < 50000 ? "warn" : "bad";
         }
 
-        function ptpStat(label, value, cls) {
-            var d = document.createElement("div"); d.className = "ptp-stat";
-            var l = document.createElement("div"); l.className = "ptp-stat-label"; l.textContent = label;
-            var v = document.createElement("div"); v.className = "ptp-stat-value" + (cls ? " " + cls : ""); v.textContent = value;
-            d.appendChild(l); d.appendChild(v); content.appendChild(d);
+        // Live strip in PTP Performance card (Diagnostics tab)
+        if (strip) {
+            function ptpStat(label, value, cls) {
+                var d = document.createElement("div"); d.className = "ptp-stat";
+                var lbl = document.createElement("div"); lbl.className = "ptp-stat-label"; lbl.textContent = label;
+                var v = document.createElement("div"); v.className = "ptp-stat-value" + (cls ? " " + cls : ""); v.textContent = value;
+                d.appendChild(lbl); d.appendChild(v); strip.appendChild(d);
+            }
+            ptpStat("State",       state.charAt(0).toUpperCase() + state.slice(1), state === "locked" ? "good" : "warn");
+            ptpStat("Offset",      offsetStr || "—", offsetClass);
+            ptpStat("Grandmaster", grandmaster || "discovering\u2026", "");
         }
-
-        ptpStat("State",       state.charAt(0).toUpperCase() + state.slice(1), state === "locked" ? "good" : "warn");
-        ptpStat("Offset",      offsetStr || "—", offsetClass);
-        ptpStat("Grandmaster", grandmaster || "discovering\u2026", "");
 
         // Update header pill
         if (offsetStr) $("hdr-ptp").textContent = "PTP " + offsetStr;
@@ -1367,7 +1369,7 @@ async function refreshPTP() {
     } catch (e) {
         badge.className = "ptp-state-badge ptp-lost";
         badge.textContent = "\u274C Error";
-        content.innerHTML = '<span class="text-danger">' + ((e && e.message) || String(e)) + '</span>';
+        if (strip) strip.innerHTML = '<span class="text-danger">' + ((e && e.message) || String(e)) + '</span>';
     }
 }
 
@@ -1858,9 +1860,9 @@ function switchTab(tabId) {
     _activeTab = tabId;
     try { localStorage.setItem("inferno-active-tab", tabId); } catch (_) {}
 
-    // Live PTP graph: poll every 5 s while Services tab is visible
+    // Live PTP graph: poll every 5 s while Services or Diagnostics tab is visible
     if (_ptpTimer) { clearInterval(_ptpTimer); _ptpTimer = null; }
-    if (tabId === "tab-services") {
+    if (tabId === "tab-services" || tabId === "tab-diagnostics") {
         _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
     }
 }
