@@ -2159,10 +2159,10 @@ const DiagnosticsTab = {
 
         // Remove any previously injected axis elements
         const removeAxes = () => {
-            const oy = document.getElementById("ptp-y-axis");
-            const ox = document.getElementById("ptp-x-axis");
-            if (oy) oy.remove();
-            if (ox) ox.remove();
+            ["ptp-y-axis", "ptp-x-axis"].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.remove();
+            });
         };
 
         if (!this.ptpData.length) { removeAxes(); return; }
@@ -2181,16 +2181,22 @@ const DiagnosticsTab = {
 
         removeAxes();
 
-        // Y-axis: dynamically created and inserted as first flex child of wrap
+        // Y-axis: absolutely-positioned labels aligned to gridline percentages
         if (wrap) {
             const yDiv = document.createElement("div");
             yDiv.id = "ptp-y-axis";
-            yDiv.style.cssText = "display:flex;flex-direction:column;justify-content:space-between;font-size:10px;font-family:monospace;color:#6a6e73;padding:2px 0;min-width:52px;text-align:right;white-space:nowrap";
-            yDiv.innerHTML = [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs]
-                .map(v => `<span>${fmt(v)}</span>`).join("");
+            yDiv.style.cssText = "position:relative;min-width:52px;flex-shrink:0;align-self:stretch";
+            [{v: maxAbs, pct: 6}, {v: maxAbs/2, pct: 28}, {v: 0, pct: 50},
+             {v: -maxAbs/2, pct: 72}, {v: -maxAbs, pct: 94}].forEach(({v, pct}) => {
+                const span = document.createElement("span");
+                span.style.cssText = `position:absolute;right:4px;top:${pct}%;transform:translateY(-50%);font-size:10px;font-family:monospace;color:#6a6e73;white-space:nowrap`;
+                span.textContent = fmt(v);
+                yDiv.appendChild(span);
+            });
             wrap.insertBefore(yDiv, wrap.firstChild);
 
-            // X-axis: inserted after wrap in the card-body
+            // X-axis: inserted inside canvas-wrapper so it naturally matches canvas width
+            const canvasWrapper = canvas.parentElement;
             const totalSec = n;
             const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
             const labels = [];
@@ -2200,9 +2206,9 @@ const DiagnosticsTab = {
             if (labels[labels.length-1] !== endLbl) labels.push(endLbl);
             const xDiv = document.createElement("div");
             xDiv.id = "ptp-x-axis";
-            xDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;font-family:monospace;color:#8a8d90;margin-left:58px;margin-bottom:0.5rem";
+            xDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;font-family:monospace;color:#8a8d90;margin-top:2px";
             xDiv.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
-            wrap.parentNode.insertBefore(xDiv, wrap.nextSibling);
+            canvasWrapper.appendChild(xDiv);
         }
 
         // Canvas: gridlines + line
