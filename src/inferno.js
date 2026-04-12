@@ -40,6 +40,7 @@ let USER_HOME   = "/var/home/core";
 
 let _refreshTimer  = null;   // auto-refresh interval handle
 let _followTimer   = null;   // journal follow interval handle
+let _ptpTimer      = null;   // PTP live-graph polling interval handle
 let _ptpHistory    = [];     // rolling offset history for sparkline (max 30 pts)
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1306,7 +1307,7 @@ async function refreshPTP() {
 
     try {
         var raw = await spSudo(
-            "journalctl -u statime-inferno -n 80 --no-pager -o cat"
+            "journalctl -u statime-inferno --since=-60s --no-pager -o cat | grep -E 'Estimated offset|Recommended state port'"
         );
         var lines = (raw || "").split("\n").filter(Boolean).reverse();
 
@@ -1318,29 +1319,39 @@ async function refreshPTP() {
 
         for (var i = 0; i < lines.length; i++) {
             var l = lines[i];
-            if (/locked/i.test(l) && state === "unknown")       state = "locked";
-            else if (/synchroniz/i.test(l) && state === "unknown") state = "syncing";
-            else if (/acquir/i.test(l) && state === "unknown")  state = "acquiring";
-            var gm = l.match(/grandmaster[:\s]+([0-9a-fA-F:.-]+)/i);
-            if (gm && !grandmaster) grandmaster = gm[1];
-            var off = l.match(/Estimated offset ([0-9.+-]+)ns/);
-            if (off && offsetNs === null) {
-                offsetNs = parseFloat(off[1]);
-                offsetStr = off[1] + " ns";
+            // State: "Recommended state port N: Some(S1(/M1/M2/M3(..." = synced/locked
+            if (state === "unknown" && /Recommended state port/.test(l)) {
+                if (/Some\([SM][1-3]\(/.test(l)) state = "locked";
+                else if (/None/.test(l))          state = "acquiring";
             }
-            if (state !== "unknown" && grandmaster && offsetNs !== null) break;
+            // Grandmaster UUID from clock_uuid bytes: [16, 231, 198, 17, 15, 4] → 10:e7:c6:11:0f:04
+            if (!grandmaster) {
+                var gm = l.match(/clock_uuid: \[(\d+), (\d+), (\d+), (\d+), (\d+), (\d+)\]/);
+                if (gm) grandmaster = [gm[1],gm[2],gm[3],gm[4],gm[5],gm[6]]
+                    .map(function(b){ return ('0'+parseInt(b).toString(16)).slice(-2); }).join(':');
+            }
+            // Most recent offset value
+            if (offsetNs === null) {
+                var off = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
+                if (off) { offsetNs = parseFloat(off[1]); offsetStr = Math.round(offsetNs) + " ns"; }
+            }
         }
-        if (state === "unknown") state = "acquiring";
 
         // Collect all recent offsets for sparkline
         var allOffsets = [];
         lines.forEach(function(l) {
-            var m = l.match(/Estimated offset ([0-9.+-]+)ns/);
+            var m = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
             if (m) allOffsets.push(parseFloat(m[1]));
         });
         allOffsets.reverse();
         if (allOffsets.length) {
             _ptpHistory = _ptpHistory.concat(allOffsets).slice(-30);
+        }
+
+        // Stability fallback: if no Recommended state line in window, infer from offsets
+        if (state === "unknown") {
+            state = (allOffsets.length >= 5 && allOffsets.slice(-5).every(function(o){ return Math.abs(o) < 1e6; }))
+                ? "locked" : "acquiring";
         }
 
         // Update badge
@@ -1465,8 +1476,12 @@ async function runHealthCheck() {
     }, "loadAloop()");
 
     await check("PTP clock locked", async function() {
-        var o = await spSudo("journalctl -u statime-inferno -n 40 --no-pager -o cat | grep -i locked | tail -1");
-        return o.trim() ? { status: "pass", detail: "locked" } : { status: "warn", detail: "not yet locked (may be syncing)" };
+        var o = await spSudo("journalctl -u statime-inferno --since=-60s --no-pager -o cat | grep 'Recommended state port' | tail -1");
+        if (/Some\([SM][1-3]\(/.test(o)) return { status: "pass", detail: "locked" };
+        var off = await spSudo("journalctl -u statime-inferno --since=-10s --no-pager -o cat | grep 'Estimated offset' | tail -5");
+        var vals = [...off.matchAll(/Estimated offset ([+-]?[0-9.]+)ns/g)].map(function(m){ return Math.abs(parseFloat(m[1])); });
+        if (vals.length >= 3 && vals.every(function(v){ return v < 1e6; })) return { status: "pass", detail: "locked (offset stable)" };
+        return { status: "warn", detail: "not yet locked (may be syncing)" };
     }, null);
 
     await check("inferno-bridge active", async function() {
@@ -1860,6 +1875,12 @@ function switchTab(tabId) {
     if (btn) btn.classList.add("tab-btn-active");
     _activeTab = tabId;
     try { localStorage.setItem("inferno-active-tab", tabId); } catch (_) {}
+
+    // Live PTP graph: poll every 5 s while Services tab is visible
+    if (_ptpTimer) { clearInterval(_ptpTimer); _ptpTimer = null; }
+    if (tabId === "tab-services") {
+        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
+    }
 }
 
 function initTabs() {
@@ -2269,229 +2290,6 @@ const DiagnosticsTab = {
     }
 };
 
-// ── First-login wizard (Item 57) ───────────────────────────────────────────────
-const FirstLoginWizard = {
-    sentinel: '/var/lib/inferno/.first-login-done',
-    currentStep: 0,
-    dialog: null,
-
-    // Each step: { id, title, description, render(el), validate() → string|null, onComplete() → Promise }
-    // Use addStep() to register steps so future callers extend without touching this object.
-    steps: [],
-
-    addStep: function(step) { this.steps.push(step); },
-
-    _showParentOverlay: function() {
-        try {
-            if (window.parent && window.parent.document && !window.parent.document.getElementById('inferno-flw-blocker')) {
-                // Elevate our own iframe above the overlay so the dialog remains interactive.
-                // The overlay (z-index:9998) dims/blocks Cockpit nav; our iframe sits above it.
-                var frames = window.parent.document.querySelectorAll('iframe');
-                for (var i = 0; i < frames.length; i++) {
-                    try {
-                        if (frames[i].contentWindow === window) {
-                            frames[i].setAttribute('data-flw-z', frames[i].style.zIndex || '');
-                            frames[i].setAttribute('data-flw-pos', frames[i].style.position || '');
-                            frames[i].style.position = 'relative';
-                            frames[i].style.zIndex = '10000';
-                            break;
-                        }
-                    } catch(e2) {}
-                }
-                var ov = window.parent.document.createElement('div');
-                ov.id = 'inferno-flw-blocker';
-                ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:9998;background:rgba(0,0,0,0.55);pointer-events:all;';
-                window.parent.document.body.appendChild(ov);
-            }
-        } catch(e) {}
-    },
-
-    _hideParentOverlay: function() {
-        try {
-            if (window.parent && window.parent.document) {
-                var ov = window.parent.document.getElementById('inferno-flw-blocker');
-                if (ov) ov.parentNode.removeChild(ov);
-                // Restore iframe z-index
-                var frames = window.parent.document.querySelectorAll('iframe');
-                for (var i = 0; i < frames.length; i++) {
-                    try {
-                        if (frames[i].contentWindow === window) {
-                            frames[i].style.zIndex = frames[i].getAttribute('data-flw-z') || '';
-                            frames[i].style.position = frames[i].getAttribute('data-flw-pos') || '';
-                            frames[i].removeAttribute('data-flw-z');
-                            frames[i].removeAttribute('data-flw-pos');
-                            break;
-                        }
-                    } catch(e2) {}
-                }
-            }
-        } catch(e) {}
-    },
-
-    show: function() {
-        this.currentStep = 0;
-        this._renderStep();
-        this._showParentOverlay();
-        this.dialog.showModal();
-    },
-
-    _renderStep: function() {
-        var step = this.steps[this.currentStep];
-        var total = this.steps.length;
-        var idx   = this.currentStep;
-
-        $('flw-step-indicator').textContent = 'Step ' + (idx + 1) + ' of ' + total;
-
-        var content = $('flw-step-content');
-        while (content.firstChild) content.removeChild(content.firstChild);
-        step.render.call(step, content);
-
-        var btnNext = $('flw-btn-next');
-        btnNext.textContent = (idx === total - 1) ? 'Complete Setup' : 'Next →';
-
-        var btnBack = $('flw-btn-back');
-        btnBack.style.display = (idx > 0) ? '' : 'none';
-    },
-
-    _showError: function(msg) {
-        var el = $('flw-error-msg');
-        if (el) el.textContent = msg || '';
-    },
-
-    _clearError: function() {
-        this._showError('');
-    },
-
-    _completeWizard: function() {
-        var self = this;
-        spSudo('mkdir -p /var/lib/inferno && sudo -n touch ' + self.sentinel)
-        .then(function() {
-            self._hideParentOverlay();
-            self.dialog.close();
-            toast('Password changed — setup complete.', 'success', 4000);
-        }).catch(function(err) {
-            // Sentinel write failed — still close (non-fatal)
-            self._hideParentOverlay();
-            self.dialog.close();
-            toast('Password changed. (Note: could not write sentinel: ' + String(err) + ')', 'warning', 6000);
-        });
-    },
-
-    init: function() {
-        var self = this;
-        self.dialog = $('first-login-dialog');
-
-        // Sentinel check — show wizard only if sentinel absent
-        cockpit.file(self.sentinel).read().then(function(content) {
-            if (content === null) self.show();
-        });
-
-        // "Remind me later" — close without writing sentinel, remove parent overlay
-        $('flw-btn-skip').addEventListener('click', function() {
-            self._hideParentOverlay();
-            self.dialog.close();
-        });
-
-        // Back button
-        $('flw-btn-back').addEventListener('click', function() {
-            if (self.currentStep > 0) {
-                self.currentStep--;
-                self._renderStep();
-            }
-        });
-
-        // Next / Complete button
-        $('flw-btn-next').addEventListener('click', function() {
-            self._clearError();
-            var step = self.steps[self.currentStep];
-            var validationError = step.validate();
-            if (validationError) {
-                self._showError(validationError);
-                return;
-            }
-
-            var btnNext = $('flw-btn-next');
-            btnNext.disabled = true;
-            btnNext.textContent = 'Working…';
-
-            step.onComplete()
-                .then(function() {
-                    if (self.currentStep < self.steps.length - 1) {
-                        self.currentStep++;
-                        self._renderStep();
-                        btnNext.disabled = false;
-                    } else {
-                        self._completeWizard();
-                    }
-                })
-                .catch(function(err) {
-                    btnNext.disabled = false;
-                    self._renderStep();
-                    self._showError('Error: ' + String(err));
-                });
-        });
-    }
-};
-
-// Register built-in wizard steps.
-// Future steps can be added the same way anywhere below this point.
-FirstLoginWizard.addStep({
-    id: 'change-password',
-    title: 'Change Default Password',
-    description: 'For security, please change the default password for the core account before continuing.',
-    render: function(el) {
-        var frag = document.createDocumentFragment();
-
-        var title = document.createElement('div');
-        title.className = 'flw-step-title';
-        title.textContent = this.title;
-        frag.appendChild(title);
-
-        var desc = document.createElement('div');
-        desc.className = 'flw-step-desc';
-        desc.textContent = this.description;
-        frag.appendChild(desc);
-
-        ['flw-current-pass', 'flw-new-pass', 'flw-confirm-pass'].forEach(function(id, i) {
-            var labels = ['Current password', 'New password', 'Confirm new password'];
-            var field = document.createElement('div');
-            field.className = 'flw-field';
-            var lbl = document.createElement('label');
-            lbl.setAttribute('for', id);
-            lbl.textContent = labels[i];
-            var inp = document.createElement('input');
-            inp.type = 'password';
-            inp.id = id;
-            inp.autocomplete = (i === 0) ? 'current-password' : 'new-password';
-            field.appendChild(lbl);
-            field.appendChild(inp);
-            frag.appendChild(field);
-        });
-
-        var errDiv = document.createElement('div');
-        errDiv.className = 'flw-error';
-        errDiv.id = 'flw-error-msg';
-        frag.appendChild(errDiv);
-
-        el.appendChild(frag);
-    },
-    validate: function() {
-        var cur  = ($('flw-current-pass')  || {}).value || '';
-        var nw   = ($('flw-new-pass')       || {}).value || '';
-        var conf = ($('flw-confirm-pass')   || {}).value || '';
-        if (!cur)           return 'Please enter your current password.';
-        if (nw.length < 8)  return 'New password must be at least 8 characters.';
-        if (nw !== conf)    return 'New passwords do not match.';
-        if (nw === cur)     return 'New password must differ from the current password.';
-        return null;
-    },
-    onComplete: function() {
-        var nw = ($('flw-new-pass') || {}).value || '';
-        return cockpit.spawn(['sudo', '-n', 'chpasswd'], { err: 'message', environ: userEnv() })
-            .input('core:' + nw);
-    }
-});
-
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function refreshAll() {
     await Promise.all([refreshServices(), refreshSystemInfo(), refreshPTP()]);
@@ -2601,11 +2399,12 @@ async function init() {
 
     // Start auto-refresh (default 20s)
     setRefreshInterval(20000);
-    // Initial PTP poll
+    // Initial PTP poll + start live timer if Services tab is active
     refreshPTP().catch(function(){});
-
-    // First-login wizard (Item 57)
-    FirstLoginWizard.init();
+    if (_activeTab === "tab-services") {
+        if (_ptpTimer) clearInterval(_ptpTimer);
+        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
+    }
 }
 
 init().catch(function(e) { toast("Init error: " + String(e), "error", 0); });
