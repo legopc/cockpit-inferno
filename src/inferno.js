@@ -1375,42 +1375,35 @@ async function refreshPTP() {
 }
 
 function drawSparkline(pts) {
-    var canvas = $("ptp-live-canvas");
-    var yAxis  = $("ptp-live-y-axis");
+    var canvas = $("diag-ptp-sparkline");
+    var yAxis  = $("ptp-y-axis");
+    var xAxis  = $("ptp-x-axis");
     if (!canvas || pts.length < 2) return;
 
     var W = canvas.width, H = canvas.height;
-    var pad = { top: 6, bottom: 6, left: 0, right: 6 };
     var ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, W, H);
 
     var absMax = Math.max.apply(null, pts.map(Math.abs));
     if (absMax < 10) absMax = 10;
 
-    var plotW = W - pad.left - pad.right;
-    var plotH = H - pad.top - pad.bottom;
+    function px(i) { return pts.length > 1 ? (i / (pts.length - 1)) * W : 0; }
+    function py(v) { return H / 2 - (v / absMax) * (H / 2 * 0.9); }
 
-    function px(i)  { return pad.left + (i / (pts.length - 1)) * plotW; }
-    function py(v)  { return pad.top  + (1 - (v + absMax) / (2 * absMax)) * plotH; }
+    var fmt = function(ns) {
+        var a = Math.abs(ns);
+        if (a < 1e3) return (ns >= 0 ? "+" : "") + Math.round(ns) + "ns";
+        if (a < 1e6) return (ns >= 0 ? "+" : "") + (ns / 1e3).toFixed(1) + "µs";
+        return (ns >= 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
+    };
 
-    // Gridlines at +absMax/2, 0, -absMax/2
-    var gridLevels = [absMax, absMax / 2, 0, -absMax / 2, -absMax];
-    ctx.strokeStyle = "rgba(255,255,255,0.1)";
-    ctx.lineWidth = 1;
-    gridLevels.forEach(function(v) {
-        ctx.beginPath();
-        ctx.moveTo(pad.left, py(v));
-        ctx.lineTo(W - pad.right, py(v));
-        ctx.stroke();
+    // Gridlines
+    [1, 0.5, 0, -0.5, -1].forEach(function(frac) {
+        ctx.strokeStyle = frac === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
+        ctx.lineWidth = frac === 0 ? 1 : 0.5;
+        var y = H / 2 - frac * (H / 2 * 0.9);
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     });
-
-    // Zero line
-    ctx.strokeStyle = "rgba(255,255,255,0.3)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(pad.left, py(0));
-    ctx.lineTo(W - pad.right, py(0));
-    ctx.stroke();
 
     // Fill area
     ctx.beginPath();
@@ -1418,7 +1411,7 @@ function drawSparkline(pts) {
     pts.forEach(function(v, i) { ctx.lineTo(px(i), py(v)); });
     ctx.lineTo(px(pts.length - 1), py(0));
     ctx.closePath();
-    ctx.fillStyle = "rgba(100,180,255,0.18)";
+    ctx.fillStyle = "rgba(224,88,16,0.18)";
     ctx.fill();
 
     // Line
@@ -1427,21 +1420,22 @@ function drawSparkline(pts) {
         if (i === 0) ctx.moveTo(px(i), py(v));
         else         ctx.lineTo(px(i), py(v));
     });
-    ctx.strokeStyle = "rgba(100,200,255,0.9)";
+    ctx.strokeStyle = "#e05810";
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // Y-axis HTML labels
-    if (yAxis) {
-        yAxis.innerHTML = "";
-        var labelVals = [absMax, absMax / 2, 0, -absMax / 2, -absMax];
-        labelVals.forEach(function(v) {
-            var sp = document.createElement("span");
-            sp.textContent = (Math.round(v) >= 0 ? "+" : "") + Math.round(v) + " ns";
-            sp.style.lineHeight = "1";
-            sp.style.opacity = "0.7";
-            yAxis.appendChild(sp);
-        });
+    // Y-axis HTML labels (only when no benchmark data loaded)
+    var ptpBenchActive = window._ptpBenchActive;
+    if (yAxis && !ptpBenchActive) {
+        yAxis.innerHTML = [absMax, absMax/2, 0, -absMax/2, -absMax]
+            .map(function(v) { return "<span>" + fmt(v) + "</span>"; }).join("");
+    }
+
+    // X-axis: label as rolling window in seconds (1 sample ≈ 1s)
+    if (xAxis && !ptpBenchActive) {
+        var n = pts.length;
+        xAxis.innerHTML = ["−" + n + "s", "−" + Math.round(n/2) + "s", "now"]
+            .map(function(l) { return "<span>" + l + "</span>"; }).join("");
     }
 }
 
@@ -2190,6 +2184,7 @@ const DiagnosticsTab = {
                     const result = JSON.parse(content);
                     this.ptpJson = content;
                     this.ptpData = result.samples || [];
+                    window._ptpBenchActive = true;
                     this.renderSparkline();
                     this.renderPtpStats(result);
                     $("diag-ptp-export-btn").disabled = false;
