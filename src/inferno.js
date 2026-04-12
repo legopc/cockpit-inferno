@@ -1288,7 +1288,7 @@ async function refreshPTP() {
 
     try {
         var raw = await spSudo(
-            "journalctl -u statime-inferno -n 80 --no-pager -o cat"
+            "journalctl -u statime-inferno --since=-60s --no-pager -o cat | grep -E 'Estimated offset|Recommended state port'"
         );
         var lines = (raw || "").split("\n").filter(Boolean).reverse();
 
@@ -1300,29 +1300,39 @@ async function refreshPTP() {
 
         for (var i = 0; i < lines.length; i++) {
             var l = lines[i];
-            if (/locked/i.test(l) && state === "unknown")       state = "locked";
-            else if (/synchroniz/i.test(l) && state === "unknown") state = "syncing";
-            else if (/acquir/i.test(l) && state === "unknown")  state = "acquiring";
-            var gm = l.match(/grandmaster[:\s]+([0-9a-fA-F:.-]+)/i);
-            if (gm && !grandmaster) grandmaster = gm[1];
-            var off = l.match(/Estimated offset ([0-9.+-]+)ns/);
-            if (off && offsetNs === null) {
-                offsetNs = parseFloat(off[1]);
-                offsetStr = off[1] + " ns";
+            // State: "Recommended state port N: Some(S1(/M1/M2/M3(..." = synced/locked
+            if (state === "unknown" && /Recommended state port/.test(l)) {
+                if (/Some\([SM][1-3]\(/.test(l)) state = "locked";
+                else if (/None/.test(l))          state = "acquiring";
             }
-            if (state !== "unknown" && grandmaster && offsetNs !== null) break;
+            // Grandmaster UUID from clock_uuid bytes: [16, 231, 198, 17, 15, 4] → 10:e7:c6:11:0f:04
+            if (!grandmaster) {
+                var gm = l.match(/clock_uuid: \[(\d+), (\d+), (\d+), (\d+), (\d+), (\d+)\]/);
+                if (gm) grandmaster = [gm[1],gm[2],gm[3],gm[4],gm[5],gm[6]]
+                    .map(function(b){ return ('0'+parseInt(b).toString(16)).slice(-2); }).join(':');
+            }
+            // Most recent offset value
+            if (offsetNs === null) {
+                var off = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
+                if (off) { offsetNs = parseFloat(off[1]); offsetStr = Math.round(offsetNs) + " ns"; }
+            }
         }
-        if (state === "unknown") state = "acquiring";
 
         // Collect all recent offsets for sparkline
         var allOffsets = [];
         lines.forEach(function(l) {
-            var m = l.match(/Estimated offset ([0-9.+-]+)ns/);
+            var m = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
             if (m) allOffsets.push(parseFloat(m[1]));
         });
         allOffsets.reverse();
         if (allOffsets.length) {
             _ptpHistory = _ptpHistory.concat(allOffsets).slice(-30);
+        }
+
+        // Stability fallback: if no Recommended state line in window, infer from offsets
+        if (state === "unknown") {
+            state = (allOffsets.length >= 5 && allOffsets.slice(-5).every(function(o){ return Math.abs(o) < 1e6; }))
+                ? "locked" : "acquiring";
         }
 
         // Update badge
