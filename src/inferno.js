@@ -2150,19 +2150,22 @@ const DiagnosticsTab = {
 
     renderSparkline() {
         const canvas = $("diag-ptp-sparkline");
-        const yAxis  = $("ptp-y-axis");
-        const xAxis  = $("ptp-x-axis");
         if (!canvas) return;
 
+        const wrap = $("ptp-graph-wrap");
         const ctx = canvas.getContext("2d");
         const W = canvas.width, H = canvas.height;
         ctx.clearRect(0, 0, W, H);
 
-        if (!this.ptpData.length) {
-            if (yAxis) { yAxis.innerHTML = ""; yAxis.style.display = "none"; }
-            if (xAxis) { xAxis.innerHTML = ""; xAxis.style.display = "none"; }
-            return;
-        }
+        // Remove any previously injected axis elements
+        const removeAxes = () => {
+            const oy = document.getElementById("ptp-y-axis");
+            const ox = document.getElementById("ptp-x-axis");
+            if (oy) oy.remove();
+            if (ox) ox.remove();
+        };
+
+        if (!this.ptpData.length) { removeAxes(); return; }
 
         const vals = this.ptpData.map(s => typeof s === "number" ? s : (s.offsetNs || s.offset || 0));
         const n = vals.length;
@@ -2176,15 +2179,18 @@ const DiagnosticsTab = {
             return (ns > 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
         };
 
-        // Y-axis HTML labels — only shown once data exists
-        if (yAxis) {
-            yAxis.innerHTML = [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs]
-                .map(v => `<span>${fmt(v)}</span>`).join("");
-            yAxis.style.display = "flex";
-        }
+        removeAxes();
 
-        // X-axis HTML labels
-        if (xAxis) {
+        // Y-axis: dynamically created and inserted as first flex child of wrap
+        if (wrap) {
+            const yDiv = document.createElement("div");
+            yDiv.id = "ptp-y-axis";
+            yDiv.style.cssText = "display:flex;flex-direction:column;justify-content:space-between;font-size:10px;font-family:monospace;color:rgba(255,255,255,0.65);padding:2px 0;min-width:52px;text-align:right;white-space:nowrap";
+            yDiv.innerHTML = [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs]
+                .map(v => `<span>${fmt(v)}</span>`).join("");
+            wrap.insertBefore(yDiv, wrap.firstChild);
+
+            // X-axis: inserted after wrap in the card-body
             const totalSec = n;
             const tickSec = totalSec <= 60 ? 15 : totalSec <= 180 ? 30 : 60;
             const labels = [];
@@ -2192,11 +2198,14 @@ const DiagnosticsTab = {
                 labels.push(t === 0 ? "0s" : t < 60 ? t + "s" : (t/60).toFixed(0) + "m");
             const endLbl = totalSec < 60 ? totalSec + "s" : (totalSec/60).toFixed(1) + "m";
             if (labels[labels.length-1] !== endLbl) labels.push(endLbl);
-            xAxis.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
-            xAxis.style.display = "flex";
+            const xDiv = document.createElement("div");
+            xDiv.id = "ptp-x-axis";
+            xDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;font-family:monospace;color:rgba(255,255,255,0.45);margin-left:58px;margin-bottom:0.5rem";
+            xDiv.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
+            wrap.parentNode.insertBefore(xDiv, wrap.nextSibling);
         }
 
-        // Canvas: gridlines + line only (no fillText)
+        // Canvas: gridlines + line
         const mid = H / 2;
         [1, 0.5, 0, -0.5, -1].forEach(frac => {
             const y = mid - frac * (mid * 0.88);
