@@ -40,6 +40,7 @@ let USER_HOME   = "/var/home/core";
 
 let _refreshTimer  = null;   // auto-refresh interval handle
 let _followTimer   = null;   // journal follow interval handle
+let _ptpTimer      = null;   // PTP live-graph polling interval handle
 let _ptpHistory    = [];     // rolling offset history for sparkline (max 30 pts)
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1856,6 +1857,12 @@ function switchTab(tabId) {
     if (btn) btn.classList.add("tab-btn-active");
     _activeTab = tabId;
     try { localStorage.setItem("inferno-active-tab", tabId); } catch (_) {}
+
+    // Live PTP graph: poll every 5 s while Services tab is visible
+    if (_ptpTimer) { clearInterval(_ptpTimer); _ptpTimer = null; }
+    if (tabId === "tab-services") {
+        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
+    }
 }
 
 function initTabs() {
@@ -2372,8 +2379,12 @@ async function init() {
 
     // Start auto-refresh (default 20s)
     setRefreshInterval(20000);
-    // Initial PTP poll
+    // Initial PTP poll + start live timer if Services tab is active
     refreshPTP().catch(function(){});
+    if (_activeTab === "tab-services") {
+        if (_ptpTimer) clearInterval(_ptpTimer);
+        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
+    }
 }
 
 init().catch(function(e) { toast("Init error: " + String(e), "error", 0); });
