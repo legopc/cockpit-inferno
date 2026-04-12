@@ -1296,40 +1296,6 @@ async function loadAloop() {
 }
 
 // ── PTP Live SVG Graph ─────────────────────────────────────────────────────
-// Bulk-load last 15 min of PTP history from journal on first load
-async function preloadPtpHistory() {
-    try {
-        var raw = await spSudo(
-            "journalctl -u statime-inferno --since=-15min --no-pager -o short-iso | grep 'Estimated offset'"
-        );
-        if (!raw) return;
-        var entries = [];
-        raw.split("\n").forEach(function(line) {
-            // short-iso: "2026-04-12T20:30:01+0000 host statime-inferno[x]: Estimated offset 123.4ns"
-            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-][\d:]+)\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
-            if (m) entries.push({ t: new Date(m[1]).getTime(), v: parseFloat(m[2]) });
-        });
-        if (!entries.length) return;
-
-        // Downsample: keep at most 1 sample per 5s bucket to match live refresh rate
-        var buckets = {};
-        entries.forEach(function(e) {
-            var bucket = Math.floor(e.t / 5000);
-            buckets[bucket] = e; // last entry in each bucket wins
-        });
-        var sampled = Object.keys(buckets).sort(function(a,b){return a-b;})
-            .map(function(k){ return buckets[k]; })
-            .slice(-180);
-
-        _ptpHistory = sampled.map(function(e){ return e.v; });
-        _ptpTimes   = sampled.map(function(e){ return e.t; });
-
-        renderPtpLiveSVG();
-        if (typeof DiagnosticsTab !== "undefined" && DiagnosticsTab.renderPtpStats) {
-            DiagnosticsTab.renderPtpStats();
-        }
-    } catch(e) { /* silent — live data will fill in */ }
-}
 function renderPtpLiveSVG() {
     var wrap = $("ptp-svg-wrap");
     if (!wrap) return;
@@ -1451,7 +1417,7 @@ async function refreshPTP() {
 
     try {
         var raw = await spSudo(
-            "journalctl -u statime-inferno --since=-15s --no-pager -o short-iso"
+            "journalctl -u statime-inferno --since=-15min --no-pager -o short-iso"
         );
         var lines = (raw || "").split("\n").filter(Boolean).reverse();
 
@@ -2458,8 +2424,7 @@ async function init() {
 
     // Start auto-refresh (default 20s)
     setRefreshInterval(20000);
-    // Pre-load 15min of PTP history from journal, then start live polling
-    preloadPtpHistory().catch(function(){});
+    // Initial PTP poll + start live timer if Services tab is active
     refreshPTP().catch(function(){});
     if (_activeTab === "tab-services") {
         if (_ptpTimer) clearInterval(_ptpTimer);
