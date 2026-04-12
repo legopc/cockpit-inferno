@@ -1306,7 +1306,7 @@ async function preloadPtpHistory() {
         var entries = [];
         raw.split("\n").forEach(function(line) {
             // short-iso: "2026-04-12T20:30:01+0000 host statime-inferno[x]: Estimated offset 123.4ns"
-            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-]\d{4})\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
+            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-][\d:]+)\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
             if (m) entries.push({ t: new Date(m[1]).getTime(), v: parseFloat(m[2]) });
         });
         if (!entries.length) return;
@@ -1482,7 +1482,7 @@ async function refreshPTP() {
         var lastKnownTs = _ptpTimes.length ? _ptpTimes[_ptpTimes.length - 1] : 0;
         var newEntries = [];
         lines.forEach(function(line) {
-            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-]\d{4})\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
+            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-][\d:]+)\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
             if (m) {
                 var t = new Date(m[1]).getTime();
                 if (t > lastKnownTs) newEntries.push({ t: t, v: parseFloat(m[2]) });
