@@ -272,19 +272,7 @@ async function populateNics(current) {
 }
 
 // ── Audio card discovery ───────────────────────────────────────────────────────
-// Parse HDA-Intel card indices from /proc/asound/cards.
-// HDA-Intel = always integrated/PCI audio (internal speakers & mics) on Intel platforms.
-// Machine-agnostic: uses kernel driver field, not codec names like ALC257/CX20632.
-function parseHdaIntelCards(procCards) {
-    var internal = {};
-    (procCards || "").split("\n").forEach(function(line) {
-        var m = line.match(/^\s*(\d+)\s+\[.*\]:\s+HDA-Intel/);
-        if (m) internal[m[1]] = true;
-    });
-    return internal;
-}
-
-function parseCards(output, filterFn, internalCards) {
+function parseCards(output, filterFn) {
     var seen = {};
     var cards = [];
     (output || "").split("\n").forEach(function(line) {
@@ -294,7 +282,6 @@ function parseCards(output, filterFn, internalCards) {
         var num = m[1], alsaId = m[2], cardName = m[3].trim(), devName = m[5].trim();
         if (seen[num]) return;
         if (/Loopback/i.test(cardName)) return;
-        if (internalCards && internalCards[num]) return;
         if (filterFn && filterFn(cardName, devName)) return;
         seen[num] = true;
         // Use stable ALSA card ID as value; label shows number + device name for clarity
@@ -314,23 +301,18 @@ async function populateAudio(currentIn, currentOut, currentIn2, currentOut2) {
     selOut2.innerHTML = '<option value="none">None — not used</option>';
     var playOut = "";
     var recOut  = "";
-    var procCards = "";
     try {
         playOut = await sp(["aplay",   "-l"]);
     } catch (_) {}
     try {
         recOut  = await sp(["arecord", "-l"]);
     } catch (_) {}
-    try {
-        procCards = await sp(["cat", "/proc/asound/cards"]);
-    } catch (_) {}
 
-    var internalCards = parseHdaIntelCards(procCards);
     var hdmiFilter = function(cardName, devName) {
         return /HDMI|DisplayPort/i.test(devName) && !/Analog/i.test(devName);
     };
-    var captureCards  = parseCards(recOut,  hdmiFilter, internalCards);
-    var playbackCards = parseCards(playOut, hdmiFilter, internalCards);
+    var captureCards  = parseCards(recOut,  hdmiFilter);
+    var playbackCards = parseCards(playOut, hdmiFilter);
 
     captureCards.forEach(function(c) {
         selIn.add(new Option(c.label, c.alsaId, false, c.alsaId === currentIn || c.num === currentIn));
