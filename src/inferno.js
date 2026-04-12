@@ -20,6 +20,11 @@ const ALL_AUX_SVCS   = ["inferno-aux-tx", "inferno-aux-rx", "inferno-aux-keepali
 
 const IRADIO_SVCS  = ["iradio-bridge"];
 
+// Services that have [Install]/WantedBy and can be persisted across reboots via enable/disable.
+// When switching modes, services outside targetSvcs are disabled so they don't come back on reboot.
+const PERSIST_SVCS = ["inferno-bridge", "inferno-keepalive", "librespot", "librespot-watchdog",
+                      "inferno-aux-tx", "inferno-aux-rx", "iradio-bridge"];
+
 const SVC_LABELS = {
     "librespot":             { label: "librespot",           desc: "Spotify Connect receiver" },
     "librespot-watchdog":    { label: "librespot-watchdog",  desc: "Watchdog & auto-restart" },
@@ -641,8 +646,9 @@ async function ensureIradioSetup(danteName, numChannels) {
             "Type=simple\n" +
             "ExecStart=" + IRADIO_BRIDGE_BIN + " --config " + IRADIO_CONFIG_PATH + "\n" +
             "Restart=on-failure\nRestartSec=5\n" +
-            "Environment=RUST_LOG=info\n";
-        // No [Install]/WantedBy — cockpit-inferno manages start/stop explicitly
+            "Environment=RUST_LOG=info\n\n" +
+            "[Install]\n" +
+            "WantedBy=default.target\n";
         await cockpit.file(IRADIO_SVC_PATH).replace(unit);
     }
 }
@@ -776,7 +782,7 @@ async function ensureAuxSetup(cardIn, cardIn2, cardOut, cardOut2, txCh, rxCh, da
         "After=statime-inferno.service default.target",
         "",
         "[Service]",
-        "ExecStart=/usr/bin/alsaloop -C " + txCapture + " -P inferno_aux_tx -r 48000 -f S32_LE -c " + txCh + " -t 10000",
+        "ExecStart=/usr/local/bin/Inferno-AUX-TX -C " + txCapture + " -P inferno_aux_tx -r 48000 -f S32_LE -c " + txCh + " -t 10000",
         "Restart=on-failure",
         "RestartSec=3",
         "",
@@ -790,7 +796,7 @@ async function ensureAuxSetup(cardIn, cardIn2, cardOut, cardOut2, txCh, rxCh, da
         "After=statime-inferno.service default.target",
         "",
         "[Service]",
-        "ExecStart=/usr/bin/alsaloop -C inferno_aux_rx -P " + rxPlayback + " -r 48000 -f S32_LE -c " + rxCh + " -t 10000",
+        "ExecStart=/usr/local/bin/Inferno-AUX-RX -C inferno_aux_rx -P " + rxPlayback + " -r 48000 -f S32_LE -c " + rxCh + " -t 10000",
         "Restart=on-failure",
         "RestartSec=3",
         "",
@@ -894,6 +900,13 @@ async function saveConfig() {
 
         if (stopSvcs)  await spUser("systemctl --user stop "    + stopSvcs  + " 2>/dev/null; true");
         if (startSvcs) await spUser("systemctl --user restart " + startSvcs + " 2>/dev/null; true");
+
+        // Persist the mode across reboots: disable services not in this mode, enable services that are.
+        // This prevents stopped services from restarting on reboot (e.g. inferno-bridge in iradio mode).
+        var toDisable = PERSIST_SVCS.filter(function(s) { return !targetSvcs.includes(s); });
+        var toEnable  = targetSvcs.filter(function(s)   { return PERSIST_SVCS.includes(s); });
+        if (toDisable.length) await spUser("systemctl --user disable " + toDisable.join(" ") + " 2>/dev/null; true");
+        if (toEnable.length)  await spUser("systemctl --user enable "  + toEnable.join(" ")  + " 2>/dev/null; true");
 
         var modeLabels = {
             "spotify":   "Spotify Connect → Dante TX",
