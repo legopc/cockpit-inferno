@@ -46,7 +46,7 @@ let USER_HOME   = "/var/home/core";
 let _refreshTimer  = null;   // auto-refresh interval handle
 let _followTimer   = null;   // journal follow interval handle
 let _ptpTimer      = null;   // PTP live-graph polling interval handle
-let _ptpHistory    = [];     // rolling offset history for live graph (max 180 pts ~15min)
+let _ptpHistory    = [];     // rolling offset history for live graph (max 900 pts ~15min @1s)
 let _ptpTimes      = [];     // timestamps (ms) matching _ptpHistory entries
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1417,7 +1417,7 @@ async function refreshPTP() {
 
     try {
         var raw = await spSudo(
-            "journalctl -u statime-inferno --since=-15min --no-pager -o short-iso"
+            "journalctl -u statime-inferno --since=-60s --no-pager -o cat | grep -E 'Estimated offset|Recommended state port'"
         );
         var lines = (raw || "").split("\n").filter(Boolean).reverse();
 
@@ -1429,39 +1429,37 @@ async function refreshPTP() {
 
         for (var i = 0; i < lines.length; i++) {
             var l = lines[i];
+            // State: "Recommended state port N: Some(S1(/M1/M2/M3(..." = synced/locked
             if (state === "unknown" && /Recommended state port/.test(l)) {
                 if (/Some\([SM][1-3]\(/.test(l)) state = "locked";
                 else if (/None/.test(l))          state = "acquiring";
             }
+            // Grandmaster UUID from clock_uuid bytes: [16, 231, 198, 17, 15, 4] → 10:e7:c6:11:0f:04
             if (!grandmaster) {
                 var gm = l.match(/clock_uuid: \[(\d+), (\d+), (\d+), (\d+), (\d+), (\d+)\]/);
                 if (gm) grandmaster = [gm[1],gm[2],gm[3],gm[4],gm[5],gm[6]]
                     .map(function(b){ return ('0'+parseInt(b).toString(16)).slice(-2); }).join(':');
             }
+            // Most recent offset value
             if (offsetNs === null) {
                 var off = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
                 if (off) { offsetNs = parseFloat(off[1]); offsetStr = Math.round(offsetNs) + " ns"; }
             }
         }
 
-        // Parse all timestamped offset lines; add only those newer than last known sample
-        var lastKnownTs = _ptpTimes.length ? _ptpTimes[_ptpTimes.length - 1] : 0;
-        var newEntries = [];
-        lines.forEach(function(line) {
-            var m = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+[+\-][\d:]+)\s+.*Estimated offset ([+-]?[0-9.]+)ns/);
-            if (m) {
-                var t = new Date(m[1]).getTime();
-                if (t > lastKnownTs) newEntries.push({ t: t, v: parseFloat(m[2]) });
-            }
+        // Collect all recent offsets for stability check only
+        var allOffsets = [];
+        lines.forEach(function(l) {
+            var m = l.match(/Estimated offset ([+-]?[0-9.]+)ns/);
+            if (m) allOffsets.push(parseFloat(m[1]));
         });
-        newEntries.sort(function(a,b){ return a.t - b.t; });
-        if (newEntries.length) {
-            _ptpHistory = _ptpHistory.concat(newEntries.map(function(e){ return e.v; })).slice(-180);
-            _ptpTimes   = _ptpTimes.concat(newEntries.map(function(e){ return e.t; })).slice(-180);
-        }
+        allOffsets.reverse();
 
-        // Stability fallback data
-        var allOffsets = newEntries.map(function(e){ return e.v; });
+        // Add exactly ONE sample per 5s refresh tick (the most recent offset)
+        if (offsetNs !== null) {
+            _ptpHistory = _ptpHistory.concat([offsetNs]).slice(-900);
+            _ptpTimes   = _ptpTimes.concat([Date.now()]).slice(-900);
+        }
 
         // Render live SVG graph + live stats
         renderPtpLiveSVG();
@@ -1992,7 +1990,7 @@ function switchTab(tabId) {
     // Live PTP graph: poll every 5 s while Services or Diagnostics tab is visible
     if (_ptpTimer) { clearInterval(_ptpTimer); _ptpTimer = null; }
     if (tabId === "tab-services" || tabId === "tab-diagnostics") {
-        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
+        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 1000);
     }
 }
 
@@ -2428,7 +2426,7 @@ async function init() {
     refreshPTP().catch(function(){});
     if (_activeTab === "tab-services") {
         if (_ptpTimer) clearInterval(_ptpTimer);
-        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 5000);
+        _ptpTimer = setInterval(function() { refreshPTP().catch(function(){}); }, 1000);
     }
 }
 
