@@ -1365,77 +1365,9 @@ async function refreshPTP() {
         // Update header pill
         if (offsetStr) $("hdr-ptp").textContent = "PTP " + offsetStr;
 
-        // Draw sparkline
-        drawSparkline(_ptpHistory);
-
     } catch (e) {
         if (badge) { badge.className = "ptp-state-badge ptp-lost"; badge.textContent = "\u274C Error"; }
         if (strip) strip.innerHTML = '<span class="text-danger">' + ((e && e.message) || String(e)) + '</span>';
-    }
-}
-
-function drawSparkline(pts) {
-    var canvas = $("diag-ptp-sparkline");
-    var yAxis  = $("ptp-y-axis");
-    var xAxis  = $("ptp-x-axis");
-    if (!canvas || pts.length < 2) return;
-
-    var W = canvas.width, H = canvas.height;
-    var ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, W, H);
-
-    var absMax = Math.max.apply(null, pts.map(Math.abs));
-    if (absMax < 10) absMax = 10;
-
-    function px(i) { return pts.length > 1 ? (i / (pts.length - 1)) * W : 0; }
-    function py(v) { return H / 2 - (v / absMax) * (H / 2 * 0.9); }
-
-    var fmt = function(ns) {
-        var a = Math.abs(ns);
-        if (a < 1e3) return (ns >= 0 ? "+" : "") + Math.round(ns) + "ns";
-        if (a < 1e6) return (ns >= 0 ? "+" : "") + (ns / 1e3).toFixed(1) + "µs";
-        return (ns >= 0 ? "+" : "") + (ns / 1e6).toFixed(2) + "ms";
-    };
-
-    // Gridlines
-    [1, 0.5, 0, -0.5, -1].forEach(function(frac) {
-        ctx.strokeStyle = frac === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
-        ctx.lineWidth = frac === 0 ? 1 : 0.5;
-        var y = H / 2 - frac * (H / 2 * 0.9);
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    });
-
-    // Fill area
-    ctx.beginPath();
-    ctx.moveTo(px(0), py(0));
-    pts.forEach(function(v, i) { ctx.lineTo(px(i), py(v)); });
-    ctx.lineTo(px(pts.length - 1), py(0));
-    ctx.closePath();
-    ctx.fillStyle = "rgba(224,88,16,0.18)";
-    ctx.fill();
-
-    // Line
-    ctx.beginPath();
-    pts.forEach(function(v, i) {
-        if (i === 0) ctx.moveTo(px(i), py(v));
-        else         ctx.lineTo(px(i), py(v));
-    });
-    ctx.strokeStyle = "#e05810";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Y-axis HTML labels (only when no benchmark data loaded)
-    var ptpBenchActive = window._ptpBenchActive;
-    if (yAxis && !ptpBenchActive) {
-        yAxis.innerHTML = [absMax, absMax/2, 0, -absMax/2, -absMax]
-            .map(function(v) { return "<span>" + fmt(v) + "</span>"; }).join("");
-    }
-
-    // X-axis: label as rolling window in seconds (1 sample ≈ 1s)
-    if (xAxis && !ptpBenchActive) {
-        var n = pts.length;
-        xAxis.innerHTML = ["−" + n + "s", "−" + Math.round(n/2) + "s", "now"]
-            .map(function(l) { return "<span>" + l + "</span>"; }).join("");
     }
 }
 
@@ -2184,7 +2116,6 @@ const DiagnosticsTab = {
                     const result = JSON.parse(content);
                     this.ptpJson = content;
                     this.ptpData = result.samples || [];
-                    window._ptpBenchActive = true;
                     this.renderSparkline();
                     this.renderPtpStats(result);
                     $("diag-ptp-export-btn").disabled = false;
