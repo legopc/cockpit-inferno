@@ -1283,7 +1283,7 @@ async function loadAloop() {
 
 // ── PTP status card ────────────────────────────────────────────────────────
 async function refreshPTP() {
-    var badge   = $("ptp-state-badge");
+    var badge   = $("ptp-state-badge"); // may be null — element removed from Services tab
     var strip   = $("ptp-live-strip");
     if (strip) strip.innerHTML = "";
 
@@ -1336,9 +1336,11 @@ async function refreshPTP() {
                 ? "locked" : "acquiring";
         }
 
-        // Update badge
+        // Update badge (null-safe — element removed from Services tab)
+        if (badge) {
         badge.className = "ptp-state-badge ptp-" + (state === "locked" ? "locked" : state === "syncing" ? "syncing" : state === "acquiring" ? "syncing" : "lost");
         badge.textContent = state === "locked" ? "\uD83D\uDD12 Locked" : state === "syncing" ? "\u231B Syncing\u2026" : "\u26A0 Acquiring\u2026";
+        }
 
         // Offset quality
         var offsetClass = "good";
@@ -1367,8 +1369,7 @@ async function refreshPTP() {
         drawSparkline(_ptpHistory);
 
     } catch (e) {
-        badge.className = "ptp-state-badge ptp-lost";
-        badge.textContent = "\u274C Error";
+        if (badge) { badge.className = "ptp-state-badge ptp-lost"; badge.textContent = "\u274C Error"; }
         if (strip) strip.innerHTML = '<span class="text-danger">' + ((e && e.message) || String(e)) + '</span>';
     }
 }
@@ -2331,8 +2332,7 @@ async function init() {
     $("btn-cfg-import").addEventListener("click", function() { $("cfg-import-file").click(); });
     $("cfg-import-file").addEventListener("change", function() { importConfig(this.files[0]); this.value = ""; });
 
-    // PTP refresh
-    $("btn-ptp-refresh").addEventListener("click", refreshPTP);
+    // PTP refresh (button removed — refreshPTP called via timer)
 
     // Health check
     $("btn-health-check").addEventListener("click", runHealthCheck);
