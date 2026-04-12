@@ -2185,7 +2185,7 @@ const DiagnosticsTab = {
         if (wrap) {
             const yDiv = document.createElement("div");
             yDiv.id = "ptp-y-axis";
-            yDiv.style.cssText = "display:flex;flex-direction:column;justify-content:space-between;font-size:10px;font-family:monospace;color:rgba(255,255,255,0.65);padding:2px 0;min-width:52px;text-align:right;white-space:nowrap";
+            yDiv.style.cssText = "display:flex;flex-direction:column;justify-content:space-between;font-size:10px;font-family:monospace;color:#6a6e73;padding:2px 0;min-width:52px;text-align:right;white-space:nowrap";
             yDiv.innerHTML = [maxAbs, maxAbs/2, 0, -maxAbs/2, -maxAbs]
                 .map(v => `<span>${fmt(v)}</span>`).join("");
             wrap.insertBefore(yDiv, wrap.firstChild);
@@ -2200,7 +2200,7 @@ const DiagnosticsTab = {
             if (labels[labels.length-1] !== endLbl) labels.push(endLbl);
             const xDiv = document.createElement("div");
             xDiv.id = "ptp-x-axis";
-            xDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;font-family:monospace;color:rgba(255,255,255,0.45);margin-left:58px;margin-bottom:0.5rem";
+            xDiv.style.cssText = "display:flex;justify-content:space-between;font-size:10px;font-family:monospace;color:#8a8d90;margin-left:58px;margin-bottom:0.5rem";
             xDiv.innerHTML = labels.map(l => `<span>${l}</span>`).join("");
             wrap.parentNode.insertBefore(xDiv, wrap.nextSibling);
         }
@@ -2209,7 +2209,7 @@ const DiagnosticsTab = {
         const mid = H / 2;
         [1, 0.5, 0, -0.5, -1].forEach(frac => {
             const y = mid - frac * (mid * 0.88);
-            ctx.strokeStyle = frac === 0 ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.07)";
+            ctx.strokeStyle = frac === 0 ? "rgba(0,0,0,0.15)" : "rgba(0,0,0,0.05)";
             ctx.lineWidth = frac === 0 ? 1 : 0.5;
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
         });
