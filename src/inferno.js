@@ -2320,6 +2320,215 @@ const DiagnosticsTab = {
     }
 };
 
+// ── SNMP Tab ───────────────────────────────────────────────────────────────────
+const SnmpTab = (function() {
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    function _escHtml(str) {
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+    }
+
+    function _updateSnmpdBadge(state) {
+        const badge = $("snmpd-status-badge");
+        if (!badge) return;
+        badge.className = "svc-badge";
+        const s = (state || "").trim();
+        if (s === "active")   { badge.classList.add("svc-active");   badge.textContent = "active"; }
+        else if (s === "failed") { badge.classList.add("svc-failed"); badge.textContent = "failed"; }
+        else                     { badge.classList.add("svc-inactive"); badge.textContent = s || "inactive"; }
+    }
+
+    // ── loadSnmpConfig ────────────────────────────────────────────────────────
+    async function loadSnmpConfig() {
+        try {
+            const text = await cockpit.file(CONF).read() || "";
+            const conf = parseConf(text);
+            const enabled = (conf.INFERNO_SNMP_ENABLED || "no").toLowerCase() === "yes";
+            _updateSnmpdBadge(enabled ? "active" : "inactive");
+            $("btn-snmpd-toggle").textContent = enabled ? "Disable SNMP" : "Enable SNMP";
+            $("snmp-v2-community").value = conf.INFERNO_SNMP_V2_COMMUNITY || "";
+            $("snmp-v3-user").value      = conf.INFERNO_SNMP_V3_USER      || "";
+            $("snmp-v3-auth").value      = conf.INFERNO_SNMP_V3_AUTH_PASS || "";
+            $("snmp-v3-priv").value      = conf.INFERNO_SNMP_V3_PRIV_PASS || "";
+        } catch (e) {
+            toast("SNMP: failed to load config — " + String(e), "error");
+        }
+    }
+
+    // ── refreshSnmpdStatus ────────────────────────────────────────────────────
+    async function refreshSnmpdStatus() {
+        let state = "unknown";
+        try {
+            const out = await sp(["systemctl", "is-active", "snmpd.service"]);
+            state = (out || "").trim();
+        } catch (e) {
+            // systemctl is-active exits non-zero when not active; message carries the state string
+            const msg = ((e && e.message) || "").trim().split("\n")[0];
+            if (msg === "inactive" || msg === "failed" || msg === "activating" || msg === "deactivating") {
+                state = msg;
+            }
+        }
+        _updateSnmpdBadge(state);
+    }
+
+    // ── saveSnmpConfig ────────────────────────────────────────────────────────
+    async function saveSnmpConfig() {
+        const v3user = $("snmp-v3-user").value.trim();
+        const v3auth = $("snmp-v3-auth").value.trim();
+        const v3priv = $("snmp-v3-priv").value.trim();
+
+        // Validate: if v3 username is set, passphrases must be ≥8 chars
+        if (v3user) {
+            if (v3auth.length > 0 && v3auth.length < 8) {
+                toast("SNMP v3 auth passphrase must be at least 8 characters.", "error");
+                return;
+            }
+            if (v3priv.length > 0 && v3priv.length < 8) {
+                toast("SNMP v3 privacy passphrase must be at least 8 characters.", "error");
+                return;
+            }
+        }
+
+        const statusEl = $("snmp-apply-status");
+        statusEl.textContent = "";
+        statusEl.classList.add("hidden");
+
+        try {
+            const text = await cockpit.file(CONF).read() || "";
+            const conf = parseConf(text);
+
+            const community = $("snmp-v2-community").value.trim();
+            if (community)  conf.INFERNO_SNMP_V2_COMMUNITY = community;
+            if (v3user)     conf.INFERNO_SNMP_V3_USER      = v3user;
+            if (v3auth)     conf.INFERNO_SNMP_V3_AUTH_PASS = v3auth;
+            if (v3priv)     conf.INFERNO_SNMP_V3_PRIV_PASS = v3priv;
+
+            await writeFileAsSudo(CONF, buildConfText(conf));
+
+            const applyOut = await spSudo("/usr/local/sbin/inferno-snmp-apply.sh");
+            statusEl.textContent = (applyOut || "").trim() || "SNMP configuration applied.";
+            statusEl.classList.remove("hidden");
+            toast("SNMP configuration saved.", "success");
+            await refreshSnmpdStatus();
+        } catch (e) {
+            const msg = (e && e.message) || String(e);
+            statusEl.textContent = "Error: " + msg;
+            statusEl.classList.remove("hidden");
+            toast("SNMP save failed — " + msg, "error");
+        }
+    }
+
+    // ── toggleSnmpd ───────────────────────────────────────────────────────────
+    async function toggleSnmpd() {
+        try {
+            const text = await cockpit.file(CONF).read() || "";
+            const conf = parseConf(text);
+            const wasEnabled = (conf.INFERNO_SNMP_ENABLED || "no").toLowerCase() === "yes";
+            conf.INFERNO_SNMP_ENABLED = wasEnabled ? "no" : "yes";
+            await writeFileAsSudo(CONF, buildConfText(conf));
+            $("btn-snmpd-toggle").textContent = wasEnabled ? "Enable SNMP" : "Disable SNMP";
+            _updateSnmpdBadge(wasEnabled ? "inactive" : "active");
+            await saveSnmpConfig();
+        } catch (e) {
+            toast("SNMP toggle failed — " + String(e), "error");
+        }
+    }
+
+    // ── pollOids ──────────────────────────────────────────────────────────────
+    const OID_KEYS = ["version", "mode", "name", "ptp_offset",
+                      "service_bridge", "service_librespot", "service_statime"];
+
+    async function pollOids() {
+        const tbody = $("snmp-oid-tbody");
+        tbody.innerHTML = '<tr><td colspan="3"><span class="loading-text">Polling OIDs\u2026</span></td></tr>';
+        const now = new Date().toLocaleTimeString();
+        const rows = [];
+        for (const key of OID_KEYS) {
+            let val = "";
+            try {
+                val = (await sp(["sudo", "-n", "/usr/local/sbin/inferno-snmp-oid.sh", key])).trim();
+            } catch (e) {
+                val = "error: " + _escHtml((e && e.message) || String(e));
+            }
+            rows.push("<tr><td>" + _escHtml(key) + "</td><td>" + _escHtml(val) + "</td><td>" + now + "</td></tr>");
+        }
+        tbody.innerHTML = rows.join("");
+    }
+
+    // ── testSnmp ──────────────────────────────────────────────────────────────
+    async function testSnmp() {
+        const statusEl  = $("snmp-apply-status");
+        const community = $("snmp-v2-community").value.trim();
+        const v3user    = $("snmp-v3-user").value.trim();
+        const v3auth    = $("snmp-v3-auth").value.trim();
+        const v3priv    = $("snmp-v3-priv").value.trim();
+
+        statusEl.textContent = "Running snmpwalk\u2026";
+        statusEl.classList.remove("hidden");
+
+        try {
+            let out = "";
+            if (community) {
+                out = await sp(["snmpwalk", "-v2c", "-c", community, "127.0.0.1", ".1.3.6.1.2.1.1"]);
+            } else if (v3user) {
+                out = await sp(["snmpwalk", "-v3", "-l", "authPriv",
+                                "-u", v3user, "-A", v3auth, "-X", v3priv,
+                                "127.0.0.1", ".1.3.6.1.2.1.1"]);
+            } else {
+                statusEl.textContent = "No community string or v3 user configured.";
+                return;
+            }
+            statusEl.textContent = (out || "").trim() || "(no output)";
+        } catch (e) {
+            const msg = (e && e.message) || String(e);
+            statusEl.textContent = "Error: " + msg;
+            toast("SNMP test failed — " + msg, "error");
+        }
+    }
+
+    // ── Password reveal toggle helper ─────────────────────────────────────────
+    function _bindReveal(btnId, inputId) {
+        const btn   = $(btnId);
+        const input = $(inputId);
+        if (!btn || !input) return;
+        btn.addEventListener("click", function() {
+            input.type = input.type === "password" ? "text" : "password";
+            btn.textContent = input.type === "password" ? "Show" : "Hide";
+        });
+    }
+
+    // ── init ──────────────────────────────────────────────────────────────────
+    function init() {
+        $("btn-snmpd-toggle").addEventListener("click", toggleSnmpd);
+        $("btn-snmp-refresh").addEventListener("click", async function() {
+            await loadSnmpConfig();
+            await refreshSnmpdStatus();
+        });
+        $("btn-snmp-apply").addEventListener("click", saveSnmpConfig);
+        $("btn-snmp-test").addEventListener("click",  testSnmp);
+        $("btn-snmp-poll").addEventListener("click",  pollOids);
+
+        _bindReveal("btn-reveal-v2",      "snmp-v2-community");
+        _bindReveal("btn-reveal-v3-auth", "snmp-v3-auth");
+        _bindReveal("btn-reveal-v3-priv", "snmp-v3-priv");
+
+        // Load config + status whenever the SNMP tab is activated
+        const snmpTabBtn = document.querySelector('[data-tab="tab-snmp"]');
+        if (snmpTabBtn) {
+            snmpTabBtn.addEventListener("click", function() {
+                loadSnmpConfig().catch(function(e) { toast("SNMP load error: " + String(e), "error"); });
+                refreshSnmpdStatus().catch(function() {});
+            });
+        }
+    }
+
+    return { init: init, loadSnmpConfig: loadSnmpConfig, refreshSnmpdStatus: refreshSnmpdStatus };
+})();
+
 // ── Init ───────────────────────────────────────────────────────────────────────
 async function refreshAll() {
     await Promise.all([refreshServices(), refreshSystemInfo(), refreshPTP()]);
@@ -2401,6 +2610,7 @@ async function init() {
     // Tab navigation (I-3)
     initTabs();
     DiagnosticsTab.init();
+    SnmpTab.init();
 
     // Audio level monitor (G-1)
     $("btn-peak-toggle").addEventListener("click", togglePeakMonitor);

@@ -708,3 +708,92 @@ body {
   overflow-y: auto;
   margin-top: 12px;
 }
+
+/* ── SNMP Tab ─────────────────────────────────────────────────────────────── */
+
+.input-with-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1;
+}
+
+.input-with-toggle .form-input {
+  flex: 1;
+}
+
+.btn-reveal {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.4rem;
+  color: var(--text-muted);
+  line-height: 1;
+  flex-shrink: 0;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn-reveal:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.snmp-oid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.snmp-oid-table th {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.snmp-oid-table td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-family: var(--font-mono, monospace);
+}
+
+.snmp-oid-table tr:last-child td {
+  border-bottom: none;
+}
+
+.snmp-oid-table .oid-name {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.snmp-oid-table .oid-value {
+  color: var(--text);
+}
+
+.snmp-oid-table .oid-ts {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+#snmp-apply-status {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+#snmp-apply-status.status-ok {
+  background: rgba(80, 200, 120, 0.12);
+  color: var(--success, #50c878);
+  border: 1px solid rgba(80, 200, 120, 0.3);
+}
+
+#snmp-apply-status.status-err {
+  background: rgba(240, 80, 80, 0.12);
+  color: var(--error, #f05050);
+  border: 1px solid rgba(240, 80, 80, 0.3);
+}

@@ -38,6 +38,7 @@
     <button class="tab-btn" data-tab="tab-audio">🔊 Audio</button>
     <button class="tab-btn" data-tab="tab-monitoring">📊 Monitoring</button>
     <button class="tab-btn" data-tab="tab-diagnostics">🩺 Diagnostics</button>
+    <button class="tab-btn" data-tab="tab-snmp">🔐 SNMP</button>
   </nav>
 
   <div class="page-body">
@@ -448,6 +449,104 @@
       </div>
 
     </div><!-- /tab-diagnostics -->
+
+    <!-- ── Tab: SNMP ──────────────────────────────────────────────────── -->
+    <div class="tab-panel tab-panel-hidden" id="tab-snmp">
+
+      <!-- SNMP Daemon Status -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">SNMP Agent</span>
+          <div class="btn-group">
+            <span id="snmpd-status-badge" class="svc-badge svc-unknown">unknown</span>
+            <button class="btn btn-secondary btn-sm" id="btn-snmpd-toggle">Enable</button>
+            <button class="btn btn-secondary btn-sm" id="btn-snmp-refresh">↻</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="row-hint">When enabled, snmpd listens on UDP 161. Configure credentials below then click <strong>Save &amp; Apply</strong>.</p>
+        </div>
+      </div>
+
+      <!-- SNMPv2c -->
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">SNMPv2c</span>
+          </div>
+          <div class="card-body">
+            <div class="form-field">
+              <div class="form-row">
+                <label class="row-label">Community String</label>
+                <div class="input-with-toggle">
+                  <input class="form-input" id="snmp-v2-community" type="password" placeholder="e.g. inferno-public" autocomplete="off">
+                  <button class="btn-reveal" id="btn-reveal-v2" title="Show/hide">👁</button>
+                </div>
+              </div>
+              <div class="row-hint">Read-only SNMPv2c access. Leave blank to disable v2c.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SNMPv3 -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">SNMPv3 (SHA-256 / AES-128)</span>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <label class="row-label">Username</label>
+              <input class="form-input" id="snmp-v3-user" type="text" placeholder="e.g. infernoAdmin" autocomplete="off">
+            </div>
+            <div class="form-row">
+              <label class="row-label">Auth Passphrase</label>
+              <div class="input-with-toggle">
+                <input class="form-input" id="snmp-v3-auth" type="password" placeholder="min 8 characters" autocomplete="new-password">
+                <button class="btn-reveal" id="btn-reveal-v3-auth" title="Show/hide">👁</button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="row-label">Privacy Passphrase</label>
+              <div class="input-with-toggle">
+                <input class="form-input" id="snmp-v3-priv" type="password" placeholder="min 8 characters" autocomplete="new-password">
+                <button class="btn-reveal" id="btn-reveal-v3-priv" title="Show/hide">👁</button>
+              </div>
+            </div>
+            <div class="row-hint">Leave username blank to disable SNMPv3.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Save & Apply -->
+      <div class="card">
+        <div class="card-body">
+          <div class="btn-group">
+            <button class="btn btn-primary" id="btn-snmp-apply">💾 Save &amp; Apply</button>
+            <button class="btn btn-secondary" id="btn-snmp-test">🔍 Test (snmpwalk)</button>
+          </div>
+          <div id="snmp-apply-status" class="row-hint hidden"></div>
+        </div>
+      </div>
+
+      <!-- OID Inspector -->
+      <div class="card" id="card-snmp-oids">
+        <div class="card-header">
+          <span class="card-title">OID Inspector</span>
+          <button class="btn btn-secondary btn-sm" id="btn-snmp-poll">↻ Poll Now</button>
+        </div>
+        <div class="card-body">
+          <table class="snmp-oid-table" id="snmp-oid-table">
+            <thead>
+              <tr><th>OID Name</th><th>Value</th><th>Polled</th></tr>
+            </thead>
+            <tbody id="snmp-oid-tbody">
+              <tr><td colspan="3" class="loading-text">Click Poll Now to load OID values…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div><!-- /tab-snmp -->
   </div><!-- /page-body -->
 
   <!-- Config change diff modal (F-2) -->
