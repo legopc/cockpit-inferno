@@ -1413,7 +1413,6 @@ function renderPtpLiveSVG() {
 async function refreshPTP() {
     var badge   = $("ptp-state-badge"); // may be null — element removed from Services tab
     var strip   = $("ptp-live-strip");
-    if (strip) strip.innerHTML = "";
 
     try {
         var raw = await spSudo(
@@ -1486,17 +1485,23 @@ async function refreshPTP() {
             offsetClass = absOff < 1000 ? "good" : absOff < 50000 ? "warn" : "bad";
         }
 
-        // Live strip in PTP Performance card (Diagnostics tab)
+        // Live strip in PTP Performance card — create once, update in place
         if (strip) {
-            function ptpStat(label, value, cls) {
-                var d = document.createElement("div"); d.className = "ptp-stat";
-                var lbl = document.createElement("div"); lbl.className = "ptp-stat-label"; lbl.textContent = label;
-                var v = document.createElement("div"); v.className = "ptp-stat-value" + (cls ? " " + cls : ""); v.textContent = value;
-                d.appendChild(lbl); d.appendChild(v); strip.appendChild(d);
+            function ptpStatUpdate(id, label, value, cls) {
+                var d = document.getElementById(id);
+                if (!d) {
+                    d = document.createElement("div"); d.className = "ptp-stat"; d.id = id;
+                    var lbl = document.createElement("div"); lbl.className = "ptp-stat-label"; lbl.textContent = label;
+                    var v = document.createElement("div"); v.className = "ptp-stat-value"; v.id = id + "-val";
+                    d.appendChild(lbl); d.appendChild(v); strip.appendChild(d);
+                }
+                var valEl = document.getElementById(id + "-val");
+                valEl.textContent = value;
+                valEl.className = "ptp-stat-value" + (cls ? " " + cls : "");
             }
-            ptpStat("State",       state.charAt(0).toUpperCase() + state.slice(1), state === "locked" ? "good" : "warn");
-            ptpStat("Offset",      offsetStr || "—", offsetClass);
-            ptpStat("Grandmaster", grandmaster || "discovering\u2026", "");
+            ptpStatUpdate("ptp-stat-state", "State",       state.charAt(0).toUpperCase() + state.slice(1), state === "locked" ? "good" : "warn");
+            ptpStatUpdate("ptp-stat-offset","Offset",      offsetStr || "—", offsetClass);
+            ptpStatUpdate("ptp-stat-gm",    "Grandmaster", grandmaster || "discovering\u2026", "");
         }
 
         // Update header pill
@@ -1504,7 +1509,8 @@ async function refreshPTP() {
 
     } catch (e) {
         if (badge) { badge.className = "ptp-state-badge ptp-lost"; badge.textContent = "\u274C Error"; }
-        if (strip) strip.innerHTML = '<span class="text-danger">' + ((e && e.message) || String(e)) + '</span>';
+        var valEl = document.getElementById("ptp-stat-state-val");
+        if (valEl) { valEl.textContent = "Error"; valEl.className = "ptp-stat-value warn"; }
     }
 }
 
