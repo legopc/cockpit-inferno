@@ -1509,7 +1509,7 @@ async function scanDanteDevices() {
         // timeout(8) kills it after 8 s; -r resolves IPs; -p gives parsable output.
         // Parsable "=" resolved line format:
         //   = ; iface ; proto ; name ; type ; domain ; host ; addr-type ; addr(IP) ; port ; txt
-        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._udp"],
+        var raw = await cockpit.spawn(["timeout", "8", "avahi-browse", "-r", "-p", "_netaudio-arc._tcp"],
                                       { err: "ignore" });
         var lines = (raw || "").split("\n").filter(function(l){ return l.startsWith("="); });
         var seen = {};
@@ -2088,7 +2088,7 @@ const DiagnosticsTab = {
 
         const benchPath = "/usr/local/sbin/inferno-bench/ptp-bench.sh";
         const proc = cockpit.spawn(
-            [benchPath, "--samples", "100", "--output", "/tmp/inferno-ptp-diag.json"],
+            [benchPath, "--minutes", "5", "--output", "/tmp/inferno-ptp-diag.json"],
             { superuser: "try", err: "message" }
         );
 
@@ -2159,16 +2159,18 @@ const DiagnosticsTab = {
             if (a < 1e6) return (ns / 1e3).toFixed(2) + " µs";
             return (ns / 1e6).toFixed(2) + " ms";
         };
-        const grade = result.grade || "";
+        const grade = (result.metadata && result.metadata.grade) || "";
         const gradeClass = grade.includes("HW") ? "badge-green" : (grade.includes("RT") ? "badge-yellow" : "badge-red");
+        const stats = result.stats || {};
+        const meta = result.metadata || {};
         el.innerHTML =
             '<div class="stat-badge ' + gradeClass + '">' + grade + "</div>" +
-            '<div class="stat-item"><span>Mean</span><strong>' + fmt(result.mean_ns || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>p95</span><strong>' + fmt(result.p95_ns || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>p99</span><strong>' + fmt(result.p99_ns || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>Abs Max</span><strong>' + fmt(result.abs_max_ns || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>Std Dev</span><strong>' + fmt(result.stddev_ns || 0) + "</strong></div>" +
-            '<div class="stat-item"><span>Samples</span><strong>' + (result.count || 0) + "</strong></div>";
+            '<div class="stat-item"><span>Mean</span><strong>' + fmt(stats.mean || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>p95</span><strong>' + fmt(stats.p95 || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>p99</span><strong>' + fmt(stats.p99 || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>Abs Max</span><strong>' + fmt(stats.abs_max || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>Std Dev</span><strong>' + fmt(stats.stddev || 0) + "</strong></div>" +
+            '<div class="stat-item"><span>Samples</span><strong>' + (meta.sample_count || 0) + "</strong></div>";
     },
 
     exportPtpCsv() {
