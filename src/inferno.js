@@ -46,7 +46,7 @@ let USER_HOME   = "/var/home/core";
 let _refreshTimer  = null;   // auto-refresh interval handle
 let _followTimer   = null;   // journal follow interval handle
 let _ptpTimer      = null;   // PTP live-graph polling interval handle
-let _ptpHistory    = [];     // rolling offset history for live graph (max 60 pts ~5min)
+let _ptpHistory    = [];     // rolling offset history for live graph (max 180 pts ~15min)
 let _ptpTimes      = [];     // timestamps (ms) matching _ptpHistory entries
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1457,8 +1457,8 @@ async function refreshPTP() {
         if (allOffsets.length) {
             const now = Date.now();
             const newTimes = allOffsets.map((_, i) => now - (allOffsets.length - 1 - i) * 5000);
-            _ptpHistory = _ptpHistory.concat(allOffsets).slice(-60);
-            _ptpTimes   = _ptpTimes.concat(newTimes).slice(-60);
+            _ptpHistory = _ptpHistory.concat(allOffsets).slice(-180);
+            _ptpTimes   = _ptpTimes.concat(newTimes).slice(-180);
         }
 
         // Render live SVG graph + live stats
