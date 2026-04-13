@@ -1502,6 +1502,18 @@ async function refreshPTP() {
             ptpStatUpdate("ptp-stat-state", "State",       state.charAt(0).toUpperCase() + state.slice(1), state === "locked" ? "good" : "warn");
             ptpStatUpdate("ptp-stat-offset","Offset",      offsetStr || "—", offsetClass);
             ptpStatUpdate("ptp-stat-gm",    "Grandmaster", grandmaster || "discovering\u2026", "");
+
+            // Clock type from /etc/inferno.conf (INFERNO_HW_PTP) + device from statime toml
+            try {
+                var hwPtp = currentConf.INFERNO_HW_PTP || "no";
+                var clockLabel = "Software (virtual)";
+                if (hwPtp === "yes") {
+                    var tomlRaw = await spSudo("cat /etc/statime-inferno.toml 2>/dev/null || true");
+                    var hwDev = (tomlRaw && tomlRaw.match(/hardware-clock\s*=\s*"([^"]+)"/) || [])[1];
+                    clockLabel = hwDev ? "Hardware (" + hwDev + ")" : "Hardware";
+                }
+                ptpStatUpdate("ptp-stat-clock", "Clock", clockLabel, hwPtp === "yes" ? "good" : "");
+            } catch (_) {}
         }
 
         // Update header pill
